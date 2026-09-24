@@ -1,15 +1,109 @@
 Work in this session yourself. Do not delegate to subagents. Do not ask me questions.
 
-Scope: a mocked dry run only, no real Gemini calls, no quota usage. Do not modify VerifierAgent.verify() itself.
+Scope: exactly one text replacement inside Orchestrator.run(). Nothing else. Do not touch CorrectionAgent, VerifierAgent, or any other method.
 
-1. Write a standalone script scratch/task1_mock_check.py (do not commit it).
-2. In it: create a Blackboard(), write a test claim, and write retrieved_evidence directly as a list of two dicts with fields id/text/metadata/distance — e.g. ids "real-evidence-1" and "real-evidence-2" — bypassing RetrievalAgent entirely (no live calls needed for this check).
-3. Create a VerifierAgent instance passing a mock gemini_caller function instead of the real one — a plain function that ignores its arguments and returns this fixed JSON string: '{"verdict": "SUPPORTED", "explanation": "test", "supporting_evidence_ids": ["real-evidence-1", "some-fake-id-not-in-evidence"], "confidence": 0.9}'
-4. Call verify() with this mocked agent and the blackboard from step 2.
-5. Print the result's supporting_evidence_ids.
-6. Actually run the script and paste the real output. Expected correct output: supporting_evidence_ids should contain only "real-evidence-1" — "some-fake-id-not-in-evidence" must be filtered out. If it isn't filtered out, that's a real bug, report it exactly, don't fix it yourself yet.
-7. If and only if the output is correct: git add -A && git commit -m "task 1: real evidence ids in verifier, mock-verified" (do not include scratch/ in the commit). Paste git log --oneline -n 3 after.
+Find this exact block inside Orchestrator.run() (the notebook cell containing "class Orchestrator"):
 
-End: paste the exact script, the exact real stdout, and the git log output.
+        elif verdict == "SUPPORTED":
+            final_response = response
+            self.blackboard.write(
+                "final_response",
+                final_response,
+                author=self.__class__.__name__,
+            )
+        else:
+            correction_result = self.correction_agent.correct(
+                self.blackboard
+            )
+            final_response = correction_result["corrected_response"]
 
-End: paste the raw output of `git log --oneline -n 3`, and state plainly whether the codebase is notebook-only or already has extracted .py files.
+Replace it with exactly this:
+
+        elif verdict == "SUPPORTED":
+            final_response = response
+            self.blackboard.write(
+                "final_response",
+                final_response,
+                author=self.__class__.__name__,
+            )
+        elif verdict == "CONTRADICTED" and verification_result.get("supporting_evidence_ids"):
+            correction_result = self.correction_agent.correct(
+                self.blackboard
+            )
+            final_response = correction_result["corrected_response"]
+        else:
+            claim_text = self.blackboard.read("claim", claim)
+            final_response = (
+                f"{response}\n\n"
+                f"[Note: the claim \"{claim_text}\" could not be verified "
+                f"against available evidence and has not been changed or "
+                f"corrected.]"
+            )
+            self.blackboard.write(
+                "final_response",
+                final_response,
+                author=self.__class__.__name__,
+            )
+
+Apply this now. Do not stop after locating it — write the change to blackboard_imp2.ipynb.
+
+If the exact block is not found verbatim (e.g. whitespace differs), paste the actual current text you found instead of guessing a replacement, and stop there — do not improvise.
+
+If the edit tool itself errors, paste the full exact error message. Do not report "unconfirmed" with no detail — either it worked, or here is the exact reason it didn't.
+
+After a successful edit, write scratch/task2_mock_check.py (do not commit) with this exact content:
+
+import sys
+
+class FakeBlackboard:
+    def __init__(self, claim):
+        self._data = {"claim": claim}
+    def read(self, key, default=None):
+        return self._data.get(key, default)
+
+class FakeCorrectionAgent:
+    def __init__(self):
+        self.called = False
+    def correct(self, blackboard):
+        self.called = True
+        return {"corrected_response": "CORRECTED"}
+
+def run_case(verdict, evidence_ids):
+    bb = FakeBlackboard("test claim")
+    correction_agent = FakeCorrectionAgent()
+    response = "ORIGINAL"
+    verification_result = {"supporting_evidence_ids": evidence_ids}
+    if verdict == "SUPPORTED":
+        final_response = response
+    elif verdict == "CONTRADICTED" and verification_result.get("supporting_evidence_ids"):
+        correction_result = correction_agent.correct(bb)
+        final_response = correction_result["corrected_response"]
+    else:
+        claim_text = bb.read("claim", "test claim")
+        final_response = f"{response}\n\n[Note: the claim \"{claim_text}\" could not be verified against available evidence and has not been changed or corrected.]"
+    return correction_agent.called, final_response
+
+cases = [
+    ("SUPPORTED", []),
+    ("CONTRADICTED", ["evidence-1"]),
+    ("CONTRADICTED", []),
+    ("INSUFFICIENT", []),
+]
+expected_called = [False, True, False, False]
+
+all_pass = True
+for (verdict, ids), expect in zip(cases, expected_called):
+    called, resp = run_case(verdict, ids)
+    ok = called == expect
+    all_pass = all_pass and ok
+    print(f"{verdict} evidence={ids}: correct() called={called} expected={expect} PASS={ok}")
+
+print("ALL PASS" if all_pass else "FAILURE")
+sys.exit(0 if all_pass else 1)
+
+Run it: python scratch/task2_mock_check.py
+Paste the exact real stdout.
+
+Do not commit anything yet. Do not attempt any real Gemini call.
+
+End: paste the exact diff applied to Orchestrator.run(), and the exact real stdout from running the script.
