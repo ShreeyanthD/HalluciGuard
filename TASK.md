@@ -1,42 +1,43 @@
-Edit ONLY MemoryAgent.log_verified_claim. Two exact replacements.
+This should be the final task because adding Markdown cells changes notebook indexes.
+Clean and regenerate the saved execution state in blackboard_imp2.ipynb.
 
-FIND:
-    ) -> str:
-        """Store the completed verification outcome in episodic memory."""
-REPLACE WITH:
-    ) -> Optional[str]:
-        """Store a verification outcome only if it is grounded. Returns record id, or None if skipped."""
+Phase 1:
+- Clear outputs from every code cell.
+- Set every execution_count to null.
+- Verify that no cell source changed.
 
-FIND:
-        if not claim:
-            raise ValueError("Cannot log memory without a claim.")
+Phase 2:
+- Execute the notebook in dependency order through component initialization.
+- Identify cells by content and notebook order rather than relying only on old numeric indexes.
+- Do not run Gemini calls.
+- Run the Paris verification test.
+- Run all four executable demonstrations.
+- Execute the SAE helper-definition cell before its demonstration.
 
-        record_id = str(uuid.uuid4())
-REPLACE WITH:
-        if not claim:
-            raise ValueError("Cannot log memory without a claim.")
+Paris verification:
 
-        verification_result = blackboard.read("verification_result", {}) or {}
-        evidence_ids = verification_result.get("supporting_evidence_ids", []) or []
-        correction_result = blackboard.read("correction_result", None)
+_r = orchestrator.run(
+    prompt="p",
+    response="Paris is the capital of France.",
+    claim="Paris is the capital of France.",
+    confidence_score=0.9,
+)
+print(_r["verification_result"])
+print(
+    "evidence label check:",
+    "[Evidence id=" in str(_r.get("blackboard", {})),
+)
 
-        grounded = (
-            (verdict == "SUPPORTED" and len(evidence_ids) > 0)
-            or (
-                verdict == "CONTRADICTED"
-                and len(evidence_ids) > 0
-                and bool(correction_result)
-            )
-        )
+Expected:
+- Verdict is SUPPORTED.
+- supporting_evidence_ids is non-empty.
+- Evidence-label check is True.
+- No exceptions occur.
 
-        if not grounded:
-            blackboard.write(
-                "memory_write_skipped",
-                f"ungrounded (verdict={verdict}, evidence_ids={len(evidence_ids)})",
-                author=self.__class__.__name__,
-            )
-            return None
-
-        record_id = str(uuid.uuid4())
-
-Show the diff. Do not run any Gemini calls.
+Requirements:
+- Show the complete Paris verification output.
+- Show the complete output of each of the four executable demonstrations.
+- Report exceptions honestly.
+- Save consistent outputs and execution counters.
+- Verify that executed code-cell counters increase monotonically.
+- Verify that no source code changed during execution.
