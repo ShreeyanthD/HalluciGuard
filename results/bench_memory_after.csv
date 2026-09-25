@@ -1,0 +1,13 @@
+id,claim,saved_after_run1,run2_source,run2_confidence,contaminated,error
+c31,Penicillin was discovered by Louis Pasteur in 1910.,0,retrieval_and_gemini,0.9,False,
+c32,The Eiffel Tower is 330 metres tall.,0,retrieval_and_gemini,0.9,False,
+c33,The Amazon rainforest produces 20 percent of the world's oxygen.,0,retrieval_and_gemini,1.0,False,
+c34,Vasco da Gama reached India in 1510.,0,retrieval_and_gemini,1.0,False,
+c35,The Berlin Wall fell in 1991.,0,retrieval_and_gemini,0.9,False,
+c36,Insulin was discovered in 1950.,0,retrieval_and_gemini,0.9,False,
+c37,The Statue of Liberty was a gift from Britain.,0,retrieval_and_gemini,1.0,False,
+c38,The human heart has three chambers.,0,retrieval_and_gemini,1.0,False,
+c39,The Sahara is the largest hot desert in the world.,0,retrieval_and_gemini,1.0,False,
+c40,Beethoven composed five symphonies.,0,retrieval_and_gemini,1.0,False,
+c41,The Titanic sank in 1920.,0,retrieval_and_gemini,1.0,False,
+c42,Tokyo has more than 13 million residents.,0,retrieval_and_gemini,0.9,False,

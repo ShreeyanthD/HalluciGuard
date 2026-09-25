@@ -1,0 +1,360 @@
+{
+  "documents": [
+    {
+      "id": "bench-everest",
+      "text": "Mount Everest is the highest mountain above sea level, with a height of about 8,849 metres. It lies on the border between Nepal and China."
+    },
+    {
+      "id": "bench-water-boiling",
+      "text": "At standard sea-level atmospheric pressure, pure water boils at 100 degrees Celsius."
+    },
+    {
+      "id": "bench-hamlet",
+      "text": "Hamlet is a tragedy written by William Shakespeare, believed to have been written between about 1599 and 1601."
+    },
+    {
+      "id": "bench-apollo11",
+      "text": "Apollo 11 landed on the Moon on 20 July 1969. Neil Armstrong was the first person to walk on the Moon."
+    },
+    {
+      "id": "bench-dna",
+      "text": "James Watson and Francis Crick proposed the double helix structure of DNA in 1953."
+    },
+    {
+      "id": "bench-python",
+      "text": "The Python programming language was created by Guido van Rossum and first released in 1991."
+    },
+    {
+      "id": "bench-canberra",
+      "text": "Canberra is the capital city of Australia. Sydney is the country's largest city but not its capital."
+    },
+    {
+      "id": "bench-ww2",
+      "text": "World War II ended in 1945, with Germany surrendering in May and Japan in September."
+    },
+    {
+      "id": "bench-curie",
+      "text": "Marie Curie won the Nobel Prize in Physics in 1903 and the Nobel Prize in Chemistry in 1911."
+    },
+    {
+      "id": "bench-light",
+      "text": "The speed of light in a vacuum is about 299,792 kilometres per second."
+    },
+    {
+      "id": "bench-pacific",
+      "text": "The Pacific Ocean is the largest and deepest of Earth's oceans."
+    },
+    {
+      "id": "bench-fuji",
+      "text": "Mount Fuji is the highest mountain in Japan, at 3,776 metres."
+    },
+    {
+      "id": "bench-gold",
+      "text": "The chemical symbol for gold is Au."
+    },
+    {
+      "id": "bench-mitochondria",
+      "text": "Mitochondria produce most of the chemical energy a cell needs, in the form of ATP."
+    },
+    {
+      "id": "bench-earth-orbit",
+      "text": "The Earth orbits the Sun once about every 365.25 days."
+    }
+  ],
+  "claims": [
+    {
+      "id": "c01",
+      "gold": "SUPPORTED",
+      "claim": "Paris is the capital of France.",
+      "prompt": "Tell me a fact.",
+      "response": "Paris is the capital of France."
+    },
+    {
+      "id": "c02",
+      "gold": "SUPPORTED",
+      "claim": "Albert Einstein developed the general theory of relativity.",
+      "prompt": "Tell me a fact.",
+      "response": "Albert Einstein developed the general theory of relativity."
+    },
+    {
+      "id": "c03",
+      "gold": "SUPPORTED",
+      "claim": "Isaac Newton published the Principia Mathematica in 1687.",
+      "prompt": "Tell me a fact.",
+      "response": "Isaac Newton published the Principia Mathematica in 1687."
+    },
+    {
+      "id": "c04",
+      "gold": "SUPPORTED",
+      "claim": "The Great Wall of China is a collection of fortifications across northern China.",
+      "prompt": "Tell me a fact.",
+      "response": "The Great Wall of China is a collection of fortifications across northern China."
+    },
+    {
+      "id": "c05",
+      "gold": "SUPPORTED",
+      "claim": "The Great Wall of China generally cannot be seen from the Moon with the unaided eye.",
+      "prompt": "Tell me a fact.",
+      "response": "The Great Wall of China generally cannot be seen from the Moon with the unaided eye."
+    },
+    {
+      "id": "c06",
+      "gold": "SUPPORTED",
+      "claim": "Mount Everest is about 8,849 metres tall.",
+      "prompt": "Tell me a fact.",
+      "response": "Mount Everest is about 8,849 metres tall."
+    },
+    {
+      "id": "c07",
+      "gold": "SUPPORTED",
+      "claim": "Pure water boils at 100 degrees Celsius at sea level.",
+      "prompt": "Tell me a fact.",
+      "response": "Pure water boils at 100 degrees Celsius at sea level."
+    },
+    {
+      "id": "c08",
+      "gold": "SUPPORTED",
+      "claim": "Hamlet was written by William Shakespeare.",
+      "prompt": "Tell me a fact.",
+      "response": "Hamlet was written by William Shakespeare."
+    },
+    {
+      "id": "c09",
+      "gold": "SUPPORTED",
+      "claim": "Apollo 11 landed on the Moon in July 1969.",
+      "prompt": "Tell me a fact.",
+      "response": "Apollo 11 landed on the Moon in July 1969."
+    },
+    {
+      "id": "c10",
+      "gold": "SUPPORTED",
+      "claim": "Watson and Crick proposed the double helix structure of DNA in 1953.",
+      "prompt": "Tell me a fact.",
+      "response": "Watson and Crick proposed the double helix structure of DNA in 1953."
+    },
+    {
+      "id": "c11",
+      "gold": "SUPPORTED",
+      "claim": "Python was created by Guido van Rossum.",
+      "prompt": "Tell me a fact.",
+      "response": "Python was created by Guido van Rossum."
+    },
+    {
+      "id": "c12",
+      "gold": "SUPPORTED",
+      "claim": "Canberra is the capital of Australia.",
+      "prompt": "Tell me a fact.",
+      "response": "Canberra is the capital of Australia."
+    },
+    {
+      "id": "c13",
+      "gold": "SUPPORTED",
+      "claim": "The speed of light in a vacuum is about 299,792 kilometres per second.",
+      "prompt": "Tell me a fact.",
+      "response": "The speed of light in a vacuum is about 299,792 kilometres per second."
+    },
+    {
+      "id": "c14",
+      "gold": "SUPPORTED",
+      "claim": "The Pacific Ocean is the largest ocean on Earth.",
+      "prompt": "Tell me a fact.",
+      "response": "The Pacific Ocean is the largest ocean on Earth."
+    },
+    {
+      "id": "c15",
+      "gold": "SUPPORTED",
+      "claim": "Mitochondria produce most of a cell's ATP.",
+      "prompt": "Tell me a fact.",
+      "response": "Mitochondria produce most of a cell's ATP."
+    },
+    {
+      "id": "c16",
+      "gold": "CONTRADICTED",
+      "claim": "The capital of France is Lyon.",
+      "prompt": "Tell me a fact.",
+      "response": "The capital of France is Lyon."
+    },
+    {
+      "id": "c17",
+      "gold": "CONTRADICTED",
+      "claim": "Isaac Newton developed the general theory of relativity.",
+      "prompt": "Tell me a fact.",
+      "response": "Isaac Newton developed the general theory of relativity."
+    },
+    {
+      "id": "c18",
+      "gold": "CONTRADICTED",
+      "claim": "Einstein completed the general theory of relativity in 1925.",
+      "prompt": "Tell me a fact.",
+      "response": "Einstein completed the general theory of relativity in 1925."
+    },
+    {
+      "id": "c19",
+      "gold": "CONTRADICTED",
+      "claim": "The Great Wall of China can easily be seen from the Moon with the naked eye.",
+      "prompt": "Tell me a fact.",
+      "response": "The Great Wall of China can easily be seen from the Moon with the naked eye."
+    },
+    {
+      "id": "c20",
+      "gold": "CONTRADICTED",
+      "claim": "Mount Everest is about 5,895 metres tall.",
+      "prompt": "Tell me a fact.",
+      "response": "Mount Everest is about 5,895 metres tall."
+    },
+    {
+      "id": "c21",
+      "gold": "CONTRADICTED",
+      "claim": "Pure water boils at 90 degrees Celsius at sea level.",
+      "prompt": "Tell me a fact.",
+      "response": "Pure water boils at 90 degrees Celsius at sea level."
+    },
+    {
+      "id": "c22",
+      "gold": "CONTRADICTED",
+      "claim": "Hamlet was written by Charles Dickens.",
+      "prompt": "Tell me a fact.",
+      "response": "Hamlet was written by Charles Dickens."
+    },
+    {
+      "id": "c23",
+      "gold": "CONTRADICTED",
+      "claim": "Apollo 11 landed on the Moon in 1972.",
+      "prompt": "Tell me a fact.",
+      "response": "Apollo 11 landed on the Moon in 1972."
+    },
+    {
+      "id": "c24",
+      "gold": "CONTRADICTED",
+      "claim": "Marie Curie won her Nobel Prize in Physics in 1920.",
+      "prompt": "Tell me a fact.",
+      "response": "Marie Curie won her Nobel Prize in Physics in 1920."
+    },
+    {
+      "id": "c25",
+      "gold": "CONTRADICTED",
+      "claim": "Python was created by Dennis Ritchie.",
+      "prompt": "Tell me a fact.",
+      "response": "Python was created by Dennis Ritchie."
+    },
+    {
+      "id": "c26",
+      "gold": "CONTRADICTED",
+      "claim": "Sydney is the capital of Australia.",
+      "prompt": "Tell me a fact.",
+      "response": "Sydney is the capital of Australia."
+    },
+    {
+      "id": "c27",
+      "gold": "CONTRADICTED",
+      "claim": "World War II ended in 1950.",
+      "prompt": "Tell me a fact.",
+      "response": "World War II ended in 1950."
+    },
+    {
+      "id": "c28",
+      "gold": "CONTRADICTED",
+      "claim": "The chemical symbol for gold is Ag.",
+      "prompt": "Tell me a fact.",
+      "response": "The chemical symbol for gold is Ag."
+    },
+    {
+      "id": "c29",
+      "gold": "CONTRADICTED",
+      "claim": "The Earth orbits the Sun once every 30 days.",
+      "prompt": "Tell me a fact.",
+      "response": "The Earth orbits the Sun once every 30 days."
+    },
+    {
+      "id": "c30",
+      "gold": "CONTRADICTED",
+      "claim": "Mount Fuji is the highest mountain in Japan, at 2,776 metres.",
+      "prompt": "Tell me a fact.",
+      "response": "Mount Fuji is the highest mountain in Japan, at 2,776 metres."
+    },
+    {
+      "id": "c31",
+      "gold": "INSUFFICIENT",
+      "claim": "Penicillin was discovered by Louis Pasteur in 1910.",
+      "prompt": "Tell me a fact.",
+      "response": "Penicillin was discovered by Louis Pasteur in 1910."
+    },
+    {
+      "id": "c32",
+      "gold": "INSUFFICIENT",
+      "claim": "The Eiffel Tower is 330 metres tall.",
+      "prompt": "Tell me a fact.",
+      "response": "The Eiffel Tower is 330 metres tall."
+    },
+    {
+      "id": "c33",
+      "gold": "INSUFFICIENT",
+      "claim": "The Amazon rainforest produces 20 percent of the world's oxygen.",
+      "prompt": "Tell me a fact.",
+      "response": "The Amazon rainforest produces 20 percent of the world's oxygen."
+    },
+    {
+      "id": "c34",
+      "gold": "INSUFFICIENT",
+      "claim": "Vasco da Gama reached India in 1510.",
+      "prompt": "Tell me a fact.",
+      "response": "Vasco da Gama reached India in 1510."
+    },
+    {
+      "id": "c35",
+      "gold": "INSUFFICIENT",
+      "claim": "The Berlin Wall fell in 1991.",
+      "prompt": "Tell me a fact.",
+      "response": "The Berlin Wall fell in 1991."
+    },
+    {
+      "id": "c36",
+      "gold": "INSUFFICIENT",
+      "claim": "Insulin was discovered in 1950.",
+      "prompt": "Tell me a fact.",
+      "response": "Insulin was discovered in 1950."
+    },
+    {
+      "id": "c37",
+      "gold": "INSUFFICIENT",
+      "claim": "The Statue of Liberty was a gift from Britain.",
+      "prompt": "Tell me a fact.",
+      "response": "The Statue of Liberty was a gift from Britain."
+    },
+    {
+      "id": "c38",
+      "gold": "INSUFFICIENT",
+      "claim": "The human heart has three chambers.",
+      "prompt": "Tell me a fact.",
+      "response": "The human heart has three chambers."
+    },
+    {
+      "id": "c39",
+      "gold": "INSUFFICIENT",
+      "claim": "The Sahara is the largest hot desert in the world.",
+      "prompt": "Tell me a fact.",
+      "response": "The Sahara is the largest hot desert in the world."
+    },
+    {
+      "id": "c40",
+      "gold": "INSUFFICIENT",
+      "claim": "Beethoven composed five symphonies.",
+      "prompt": "Tell me a fact.",
+      "response": "Beethoven composed five symphonies."
+    },
+    {
+      "id": "c41",
+      "gold": "INSUFFICIENT",
+      "claim": "The Titanic sank in 1920.",
+      "prompt": "Tell me a fact.",
+      "response": "The Titanic sank in 1920."
+    },
+    {
+      "id": "c42",
+      "gold": "INSUFFICIENT",
+      "claim": "Tokyo has more than 13 million residents.",
+      "prompt": "Tell me a fact.",
+      "response": "Tokyo has more than 13 million residents."
+    }
+  ]
+}

@@ -1,0 +1,67 @@
+id,gold,claim,predicted,correct,source,n_evidence_ids,corrected,new_numbers,final_response,error
+c01,SUPPORTED,Paris is the capital of France.,SUPPORTED,True,retrieval_and_gemini,1,False,,Paris is the capital of France.,
+c02,SUPPORTED,Albert Einstein developed the general theory of relativity.,SUPPORTED,True,retrieval_and_gemini,1,False,,Albert Einstein developed the general theory of relativity.,
+c03,SUPPORTED,Isaac Newton published the Principia Mathematica in 1687.,SUPPORTED,True,retrieval_and_gemini,1,False,,Isaac Newton published the Principia Mathematica in 1687.,
+c04,SUPPORTED,The Great Wall of China is a collection of fortifications across northern China.,SUPPORTED,True,retrieval_and_gemini,1,False,,The Great Wall of China is a collection of fortifications across northern China.,
+c05,SUPPORTED,The Great Wall of China generally cannot be seen from the Moon with the unaided eye.,SUPPORTED,True,retrieval_and_gemini,1,False,,The Great Wall of China generally cannot be seen from the Moon with the unaided eye.,
+c06,SUPPORTED,"Mount Everest is about 8,849 metres tall.",SUPPORTED,True,retrieval_and_gemini,1,False,,"Mount Everest is about 8,849 metres tall.",
+c07,SUPPORTED,Pure water boils at 100 degrees Celsius at sea level.,SUPPORTED,True,retrieval_and_gemini,1,False,,Pure water boils at 100 degrees Celsius at sea level.,
+c08,SUPPORTED,Hamlet was written by William Shakespeare.,SUPPORTED,True,retrieval_and_gemini,1,False,,Hamlet was written by William Shakespeare.,
+c09,SUPPORTED,Apollo 11 landed on the Moon in July 1969.,SUPPORTED,True,retrieval_and_gemini,1,False,,Apollo 11 landed on the Moon in July 1969.,
+c10,SUPPORTED,Watson and Crick proposed the double helix structure of DNA in 1953.,SUPPORTED,True,retrieval_and_gemini,1,False,,Watson and Crick proposed the double helix structure of DNA in 1953.,
+c11,SUPPORTED,Python was created by Guido van Rossum.,SUPPORTED,True,retrieval_and_gemini,1,False,,Python was created by Guido van Rossum.,
+c12,SUPPORTED,Canberra is the capital of Australia.,SUPPORTED,True,retrieval_and_gemini,1,False,,Canberra is the capital of Australia.,
+c13,SUPPORTED,"The speed of light in a vacuum is about 299,792 kilometres per second.",SUPPORTED,True,retrieval_and_gemini,1,False,,"The speed of light in a vacuum is about 299,792 kilometres per second.",
+c14,SUPPORTED,The Pacific Ocean is the largest ocean on Earth.,SUPPORTED,True,retrieval_and_gemini,1,False,,The Pacific Ocean is the largest ocean on Earth.,
+c15,SUPPORTED,Mitochondria produce most of a cell's ATP.,SUPPORTED,True,retrieval_and_gemini,1,False,,Mitochondria produce most of a cell's ATP.,
+c16,CONTRADICTED,The capital of France is Lyon.,CONTRADICTED,True,retrieval_and_gemini,1,True,,Paris is the capital and most populous city of France.,
+c17,CONTRADICTED,Isaac Newton developed the general theory of relativity.,CONTRADICTED,True,retrieval_and_gemini,2,True,,Albert Einstein developed the general theory of relativity.,
+c18,CONTRADICTED,Einstein completed the general theory of relativity in 1925.,CONTRADICTED,True,retrieval_and_gemini,1,True,,"Albert Einstein presented the general theory of relativity in 1915, and the theory was published in 1916.",
+c19,CONTRADICTED,The Great Wall of China can easily be seen from the Moon with the naked eye.,CONTRADICTED,True,retrieval_and_gemini,1,True,,"The Great Wall of China is a series of fortifications built across northern China over many centuries, and it cannot be seen from the Moon with the naked eye.",
+c20,CONTRADICTED,"Mount Everest is about 5,895 metres tall.",CONTRADICTED,True,retrieval_and_gemini,1,True,,"Mount Everest is about 8,849 metres tall.",
+c21,CONTRADICTED,Pure water boils at 90 degrees Celsius at sea level.,CONTRADICTED,True,retrieval_and_gemini,1,True,,Pure water boils at 100 degrees Celsius at sea level.,
+c22,CONTRADICTED,Hamlet was written by Charles Dickens.,CONTRADICTED,True,retrieval_and_gemini,1,True,,"Hamlet is a tragedy written by William Shakespeare, believed to have been written between about 1599 and 1601.",
+c23,CONTRADICTED,Apollo 11 landed on the Moon in 1972.,CONTRADICTED,True,retrieval_and_gemini,1,True,,Apollo 11 landed on the Moon on 20 July 1969.,
+c24,CONTRADICTED,Marie Curie won her Nobel Prize in Physics in 1920.,CONTRADICTED,True,retrieval_and_gemini,1,True,,Marie Curie won the Nobel Prize in Physics in 1903 and the Nobel Prize in Chemistry in 1911.,
+c25,CONTRADICTED,Python was created by Dennis Ritchie.,CONTRADICTED,True,retrieval_and_gemini,1,True,,Python was created by Guido van Rossum and first released in 1991.,
+c26,CONTRADICTED,Sydney is the capital of Australia.,CONTRADICTED,True,retrieval_and_gemini,1,True,,Canberra is the capital of Australia.,
+c27,CONTRADICTED,World War II ended in 1950.,CONTRADICTED,True,retrieval_and_gemini,1,True,,"World War II ended in 1945, with Germany surrendering in May and Japan in September.",
+c28,CONTRADICTED,The chemical symbol for gold is Ag.,CONTRADICTED,True,retrieval_and_gemini,1,True,,The chemical symbol for gold is Au.,
+c29,CONTRADICTED,The Earth orbits the Sun once every 30 days.,CONTRADICTED,True,retrieval_and_gemini,1,True,,The Earth orbits the Sun once about every 365.25 days.,
+c30,CONTRADICTED,"Mount Fuji is the highest mountain in Japan, at 2,776 metres.",CONTRADICTED,True,retrieval_and_gemini,1,True,,"Mount Fuji is the highest mountain in Japan, at 3,776 metres.",
+c31,INSUFFICIENT,Penicillin was discovered by Louis Pasteur in 1910.,INSUFFICIENT,True,retrieval_and_gemini,0,False,,"Penicillin was discovered by Louis Pasteur in 1910.
+
+[Note: the claim ""Penicillin was discovered by Louis Pasteur in 1910."" could not be verified against available evidence and has not been changed or corrected.]",
+c32,INSUFFICIENT,The Eiffel Tower is 330 metres tall.,INSUFFICIENT,True,retrieval_and_gemini,0,False,,"The Eiffel Tower is 330 metres tall.
+
+[Note: the claim ""The Eiffel Tower is 330 metres tall."" could not be verified against available evidence and has not been changed or corrected.]",
+c33,INSUFFICIENT,The Amazon rainforest produces 20 percent of the world's oxygen.,INSUFFICIENT,True,retrieval_and_gemini,0,False,,"The Amazon rainforest produces 20 percent of the world's oxygen.
+
+[Note: the claim ""The Amazon rainforest produces 20 percent of the world's oxygen."" could not be verified against available evidence and has not been changed or corrected.]",
+c34,INSUFFICIENT,Vasco da Gama reached India in 1510.,INSUFFICIENT,True,retrieval_and_gemini,0,False,,"Vasco da Gama reached India in 1510.
+
+[Note: the claim ""Vasco da Gama reached India in 1510."" could not be verified against available evidence and has not been changed or corrected.]",
+c35,INSUFFICIENT,The Berlin Wall fell in 1991.,INSUFFICIENT,True,retrieval_and_gemini,0,False,,"The Berlin Wall fell in 1991.
+
+[Note: the claim ""The Berlin Wall fell in 1991."" could not be verified against available evidence and has not been changed or corrected.]",
+c36,INSUFFICIENT,Insulin was discovered in 1950.,INSUFFICIENT,True,retrieval_and_gemini,0,False,,"Insulin was discovered in 1950.
+
+[Note: the claim ""Insulin was discovered in 1950."" could not be verified against available evidence and has not been changed or corrected.]",
+c37,INSUFFICIENT,The Statue of Liberty was a gift from Britain.,INSUFFICIENT,True,retrieval_and_gemini,0,False,,"The Statue of Liberty was a gift from Britain.
+
+[Note: the claim ""The Statue of Liberty was a gift from Britain."" could not be verified against available evidence and has not been changed or corrected.]",
+c38,INSUFFICIENT,The human heart has three chambers.,INSUFFICIENT,True,retrieval_and_gemini,0,False,,"The human heart has three chambers.
+
+[Note: the claim ""The human heart has three chambers."" could not be verified against available evidence and has not been changed or corrected.]",
+c39,INSUFFICIENT,The Sahara is the largest hot desert in the world.,INSUFFICIENT,True,retrieval_and_gemini,0,False,,"The Sahara is the largest hot desert in the world.
+
+[Note: the claim ""The Sahara is the largest hot desert in the world."" could not be verified against available evidence and has not been changed or corrected.]",
+c40,INSUFFICIENT,Beethoven composed five symphonies.,INSUFFICIENT,True,retrieval_and_gemini,0,False,,"Beethoven composed five symphonies.
+
+[Note: the claim ""Beethoven composed five symphonies."" could not be verified against available evidence and has not been changed or corrected.]",
+c41,INSUFFICIENT,The Titanic sank in 1920.,INSUFFICIENT,True,retrieval_and_gemini,0,False,,"The Titanic sank in 1920.
+
+[Note: the claim ""The Titanic sank in 1920."" could not be verified against available evidence and has not been changed or corrected.]",
+c42,INSUFFICIENT,Tokyo has more than 13 million residents.,INSUFFICIENT,True,retrieval_and_gemini,0,False,,"Tokyo has more than 13 million residents.
+
+[Note: the claim ""Tokyo has more than 13 million residents."" could not be verified against available evidence and has not been changed or corrected.]",
