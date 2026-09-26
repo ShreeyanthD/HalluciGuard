@@ -1,6 +1,6 @@
-# HalluciGuard
+# BlackBoard-arch
 
-**HalluciGuard** is a Blackboard-architecture pipeline for mitigating LLM hallucinations. When an external hallucination-risk detector (e.g. a sparse autoencoder, or SAE) flags a response as risky, HalluciGuard extracts the specific claim at fault, checks episodic memory for a past verdict, retrieves supporting evidence from a knowledge base, verifies the claim against that evidence, and — if the claim is unsupported — corrects or hedges the response before it reaches the user.
+**BlackBoard-arch** is a Blackboard-architecture pipeline for mitigating LLM hallucinations. When an external hallucination-risk detector (e.g. a sparse autoencoder, or SAE) flags a response as risky, BlackBoard-arch extracts the specific claim at fault, checks episodic memory for a past verdict, retrieves supporting evidence from a knowledge base, verifies the claim against that evidence, and — if the claim is unsupported — corrects or hedges the response before it reaches the user.
 
 It ships as a small FastAPI service with a live "Blackboard trace" frontend that visualizes each stage of the pipeline for a submitted prompt/response pair.
 
@@ -27,7 +27,7 @@ Every read/write to the Blackboard is logged with a timestamp and author, giving
 ├── blackboard_imp2.ipynb   # Original notebook implementation
 ├── server.py               # FastAPI app: /analyze, /health, and static frontend host
 ├── static/index.html       # Live Blackboard trace demo UI
-├── halluciguard_chroma/    # Persistent ChromaDB store (knowledge + memory collections)
+├── BlackBoard-arch_chroma/    # Persistent ChromaDB store (knowledge + memory collections)
 └── requirements.txt
 ```
 
@@ -52,10 +52,10 @@ pip install -r requirements.txt
    $env:GROQ_API_KEY="your_key_here"         # Windows PowerShell
    ```
 
-2. (Optional) Point the server at an existing seeded ChromaDB directory, if it's not the default `./halluciguard_chroma`:
+2. (Optional) Point the server at an existing seeded ChromaDB directory, if it's not the default `./BlackBoard-arch_chroma`:
 
    ```bash
-   export CHROMA_PERSIST_DIRECTORY=/path/to/your/halluciguard_chroma
+   export CHROMA_PERSIST_DIRECTORY=/path/to/your/BlackBoard-arch_chroma
    ```
 
 3. Run the server:
@@ -107,9 +107,9 @@ Key environment variables:
 |---|---|---|---|
 | `GROQ_API_KEY` | Yes | — | Powers the Verifier, Correction, and Claim Extraction agents via Groq. |
 | `GROQ_MODEL` | No | `openai/gpt-oss-120b` | Groq model to use. |
-| `CHROMA_PERSIST_DIRECTORY` | No | `./halluciguard_chroma` | Path to the persistent ChromaDB store for the knowledge and memory collections. |
-| `HALLUCIGUARD_KEY` | No | — | Gemini API key, if you want an alternate LLM provider available. |
-| `GEMINI_MODEL` | No | `gemini-3.6-flash` | Gemini model, used only if `HALLUCIGUARD_KEY` is set. |
+| `CHROMA_PERSIST_DIRECTORY` | No | `./BlackBoard-arch_chroma` | Path to the persistent ChromaDB store for the knowledge and memory collections. |
+| `BlackBoard-arch_KEY` | No | — | Gemini API key, if you want an alternate LLM provider available. |
+| `GEMINI_MODEL` | No | `gemini-3.6-flash` | Gemini model, used only if `BlackBoard-arch_KEY` is set. |
 
 Other pipeline constants (`RETRIEVAL_TOP_K`, `MEMORY_TOP_K`, `MAX_VERIFICATION_ROUNDS`, similarity thresholds) are set in `blackboard_core.py`.
 
@@ -124,4 +124,4 @@ Other pipeline constants (`RETRIEVAL_TOP_K`, `MEMORY_TOP_K`, `MAX_VERIFICATION_R
 ## Notes
 
 - `server.py` is an adaptation of the pipeline logic originally developed in `blackboard_imp2.ipynb`; no pipeline behavior was changed in the port — see the `CHANGES FROM THE NOTEBOOK` note at the bottom of `blackboard_core.py` for the (non-logic) differences.
-- The `halluciguard_chroma/` directory contains a working ChromaDB store. If you're pushing this repo publicly, consider whether you want to commit it as-is, ship it empty, or add it to `.gitignore` and let it be recreated on first run.
+- The `BlackBoard-arch_chroma/` directory contains a working ChromaDB store. If you're pushing this repo publicly, consider whether you want to commit it as-is, ship it empty, or add it to `.gitignore` and let it be recreated on first run.
