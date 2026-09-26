@@ -1,9 +1,0 @@
-metric,before,after
-Verdict accuracy (%),100.0,100.0
-SUPPORTED accuracy (%),100.0,100.0
-CONTRADICTED accuracy (%),100.0,100.0
-INSUFFICIENT accuracy (%),100.0,100.0
-Unsupported-correction rate (%)  [lower is better],100.0,0.0
-Corrections with invented numbers  [lower is better],7,0
-Ungrounded results saved to memory (%)  [lower is better],100.0,0.0
-Memory-contamination rate (%)  [lower is better],100.0,0.0

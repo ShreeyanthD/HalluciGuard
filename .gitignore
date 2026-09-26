@@ -1,4 +1,32 @@
-halluciguard_chroma/
-scratch/
+# --- Python ---
 __pycache__/
-*.pyc
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+env/
+
+# --- Environment / secrets ---
+.env
+.env.*
+*.key
+
+# --- ChromaDB persistent store ---
+halluciguard_chroma/
+
+# --- Jupyter ---
+.ipynb_checkpoints/
+
+# --- Node / tooling ---
+node_modules/
+.opencode/
+
+# --- OS / editor cruft ---
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+
+# --- misc ---
+scratch/
