@@ -46,6 +46,7 @@ for _sub in ("probe", "blackboard"):
         sys.path.insert(0, _p)
 
 import blackboard_core as bc  # blackboard/blackboard_core.py — /analyze uses this directly
+from trace import build_trace  # blackboard/trace.py — shapes results for static/index.html
 from pipeline import HallucinationMitigationPipeline
 
 app = FastAPI(title="Merged Hallucination Detection + Mitigation Pipeline")
@@ -124,9 +125,10 @@ def score_and_mitigate(req: ScoreAndMitigateRequest) -> Dict[str, Any]:
 
 @app.post("/analyze")
 def analyze(req: AnalyzeRequest) -> Dict[str, Any]:
-    """Original Blackboard-arch endpoint — bring your own confidence_score."""
+    """Original Blackboard-arch endpoint — bring your own confidence_score.
+    Returns the same stage-by-stage trace shape the frontend expects."""
     try:
-        return bc.process_response(
+        result = bc.process_response(
             prompt=req.prompt,
             response=req.response,
             confidence_score=req.confidence_score,
@@ -135,6 +137,27 @@ def analyze(req: AnalyzeRequest) -> Dict[str, Any]:
         raise HTTPException(status_code=400, detail=str(exc))
     except Exception as exc:
         raise HTTPException(status_code=502, detail=f"Pipeline error: {exc}")
+
+    return build_trace(result)
+
+
+@app.post("/ask_trace")
+def ask_trace(req: AskRequest) -> Dict[str, Any]:
+    """Same as /ask, but shaped for the frontend's stage-by-stage trace UI
+    (used by static/index.html's 'Ask the model' mode)."""
+    pipeline = get_pipeline()
+    try:
+        r = pipeline.run(req.question, max_new_tokens=req.max_new_tokens)
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Pipeline error: {exc}")
+
+    trace = build_trace(r["blackboard_raw"])
+    trace["question"] = r["question"]
+    trace["generated_answer"] = r["generated_answer"]
+    trace["prob_hallucinated"] = r["prob_hallucinated"]
+    return trace
 
 
 @app.get("/health")
