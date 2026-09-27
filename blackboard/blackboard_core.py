@@ -1038,6 +1038,7 @@ class Orchestrator:
                 and self.web_search_agent is not None
                 and self.web_search_agent.enabled
             ):
+                print("INSUFFICIENT and Not present in the Databse and hence falling back to a web search")
                 self.blackboard.write("verification_round", "web_search_fallback", author=self.__class__.__name__)
                 self.web_search_agent.augment_evidence(self.blackboard, claim)
                 verification_result = self.verifier_agent.verify(self.blackboard)
