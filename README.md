@@ -1,127 +1,145 @@
-# BlackBoard-arch
+# Merged Hallucination Detection + Mitigation Pipeline
 
-**BlackBoard-arch** is a Blackboard-architecture pipeline for mitigating LLM hallucinations. When an external hallucination-risk detector (e.g. a sparse autoencoder, or SAE) flags a response as risky, BlackBoard-arch extracts the specific claim at fault, checks episodic memory for a past verdict, retrieves supporting evidence from a knowledge base, verifies the claim against that evidence, and — if the claim is unsupported — corrects or hedges the response before it reaches the user.
+This merges two previously separate systems into one pipeline:
 
-It ships as a small FastAPI service with a live "Blackboard trace" frontend that visualizes each stage of the pipeline for a submitted prompt/response pair.
+1. **`probe/`** — a residual-stream probe (Qwen2.5 layer 20 hidden states ->
+   `StandardScaler` + `LogisticRegression`) that looks at a generated answer
+   and outputs `prob_hallucinated` in `[0, 1]`.
+2. **`blackboard/`** — the Blackboard-architecture mitigation system
+   (`BlackBoard-arch`). If a response's risk score is at/above a threshold
+   (default `0.70`), a sequence of agents — `ClaimExtractor` ->
+   `MemoryAgent` -> `RetrievalAgent` -> `VerifierAgent` -> `CorrectionAgent`
+   — extracts the riskiest claim, checks episodic memory, retrieves
+   evidence from a knowledge base, verifies the claim, and corrects or
+   hedges the response if it's unsupported.
 
-## How it works
+Nothing inside `probe/` or `blackboard/` was changed — the two systems
+already spoke the same language (a `[0, 1]` risk score in, a response out),
+so `pipeline.py` is just the wiring between them.
 
-Responses only enter the pipeline if their hallucination-risk score is at or above a threshold (`HALLUCINATION_RISK_THRESHOLD`, default `0.70`). Below that, the response is returned unchanged.
+## How a request flows end-to-end
 
-For flagged responses, a shared **Blackboard** workspace is used by a sequence of agents:
-
-1. **ClaimExtractor** — identifies the single most important, independently verifiable factual claim in the response (the one most likely responsible for the risk score).
-2. **MemoryAgent** — checks episodic memory (a ChromaDB collection of previously verified claims) for a similar past verdict. A close-enough match short-circuits retrieval and verification.
-3. **RetrievalAgent** — if no memory hit, retrieves the top-k relevant documents from a persistent knowledge base (also ChromaDB) as evidence.
-4. **VerifierAgent** — judges the claim against the retrieved evidence, returning a verdict of `SUPPORTED`, `CONTRADICTED`, or `INSUFFICIENT`.
-5. **CorrectionAgent** — if the claim is contradicted, rewrites the response to be grounded in the evidence. If evidence is insufficient, a hedge is appended instead of inventing a correction. Supported claims pass through unchanged.
-6. Grounded, evidence-backed verdicts are written back to episodic memory so future occurrences of the same (or a very similar) claim can be resolved instantly.
-
-Every read/write to the Blackboard is logged with a timestamp and author, giving a full audit trail (`blackboard_history`) of how a response was processed.
+```
+question
+   │
+   ▼
+QwenResidualFeatureExtractor.batch_generate_and_extract_features()   [probe/llama_features.py]
+   │  -> generated answer + mean-pooled layer-20 residual-stream vector
+   ▼
+scaler.transform() -> classifier.predict_proba()                     [trained probe .joblib]
+   │  -> prob_hallucinated  (0.0–1.0)
+   ▼
+blackboard_core.process_response(prompt, response, prob_hallucinated) [blackboard/blackboard_core.py]
+   │
+   ├─ prob_hallucinated < 0.70  ─────────────────────────► response returned unchanged
+   │
+   └─ prob_hallucinated ≥ 0.70
+        ├─ ClaimExtractor   – picks the single riskiest claim
+        ├─ MemoryAgent      – checks episodic memory for a past verdict
+        ├─ RetrievalAgent   – (if no memory hit) pulls top-k evidence docs
+        ├─ VerifierAgent    – SUPPORTED / CONTRADICTED / INSUFFICIENT
+        └─ CorrectionAgent  – rewrites (if contradicted) or hedges (if
+                              insufficient); passes through unchanged if
+                              supported
+   │
+   ▼
+final_response  (+ full trace: extracted claim, verdict, evidence, etc.)
+```
 
 ## Project structure
 
 ```
 .
-├── blackboard_core.py      # Agents, Orchestrator, Blackboard, ChromaDB setup, process_response()
-├── blackboard_imp2.ipynb   # Original notebook implementation
-├── server.py               # FastAPI app: /analyze, /health, and static frontend host
-├── static/index.html       # Live Blackboard trace demo UI
-├── BlackBoard-arch_chroma/    # Persistent ChromaDB store (knowledge + memory collections)
+├── pipeline.py            # NEW — the merge point (see below)
+├── unified_server.py       # NEW — one FastAPI service exposing /ask, /score_and_mitigate, /analyze
+├── probe/
+│   ├── llama_features.py   # Qwen2.5 residual-stream feature extractor
+│   ├── Dataset_builder.py  # manual-labeling dataset builder (HaluEval)
+│   ├── train_probe.py      # trains scaler + LogisticRegression -> probe.joblib
+│   └── infer_probe.py      # standalone probe inference (unchanged, still works on its own)
+├── blackboard/
+│   ├── blackboard_core.py  # Agents, Orchestrator, Blackboard, ChromaDB, process_response()
+│   ├── server.py           # original standalone Blackboard-only FastAPI app (unchanged)
+│   └── static/index.html   # live Blackboard trace demo UI
 └── requirements.txt
 ```
 
-## Requirements
-
-- Python 3.10+
-- A [Groq](https://console.groq.com/) API key (used by the Verifier, Correction, and Claim Extraction agents)
-- Optionally, a Gemini API key if you want to swap the LLM provider (see [Configuration](#configuration))
-
-Install dependencies:
+## Setup
 
 ```bash
 pip install -r requirements.txt
 ```
 
-## Setup
-
-1. Set your Groq API key (required — the server fails fast at startup without it):
-
-   ```bash
-   export GROQ_API_KEY=your_key_here        # Linux/macOS
-   $env:GROQ_API_KEY="your_key_here"         # Windows PowerShell
-   ```
-
-2. (Optional) Point the server at an existing seeded ChromaDB directory, if it's not the default `./BlackBoard-arch_chroma`:
-
-   ```bash
-   export CHROMA_PERSIST_DIRECTORY=/path/to/your/BlackBoard-arch_chroma
-   ```
-
-3. Run the server:
-
-   ```bash
-   uvicorn server:app --reload --port 8000
-   ```
-
-4. Open [http://localhost:8000](http://localhost:8000) to use the live Blackboard trace demo.
-
-## API
-
-### `POST /analyze`
-
-Runs a prompt/response pair through the pipeline.
-
-**Request body:**
-
-```json
-{
-  "prompt": "What year was the Eiffel Tower completed?",
-  "response": "The Eiffel Tower was completed in 1887.",
-  "confidence_score": 0.85
-}
-```
-
-- `confidence_score` is the external hallucination-risk score (0.0–1.0), typically produced upstream by an SAE or similar detector.
-
-**Response:** a stage-by-stage trace object showing whether the pipeline was skipped (low risk) or run, and if run, the memory check, retrieved evidence, verification verdict, and correction/hedge/pass-through result.
-
-### `GET /health`
-
-Returns service status plus the current document counts in the knowledge and memory collections, and the active risk threshold.
-
-```json
-{
-  "status": "ok",
-  "knowledge_docs": 20,
-  "memory_docs": 4,
-  "threshold": 0.7
-}
-```
-
-## Configuration
-
-Key environment variables:
+Environment variables:
 
 | Variable | Required | Default | Purpose |
 |---|---|---|---|
-| `GROQ_API_KEY` | Yes | — | Powers the Verifier, Correction, and Claim Extraction agents via Groq. |
-| `GROQ_MODEL` | No | `openai/gpt-oss-120b` | Groq model to use. |
-| `CHROMA_PERSIST_DIRECTORY` | No | `./BlackBoard-arch_chroma` | Path to the persistent ChromaDB store for the knowledge and memory collections. |
-| `BlackBoard-arch_KEY` | No | — | Gemini API key, if you want an alternate LLM provider available. |
-| `GEMINI_MODEL` | No | `gemini-3.6-flash` | Gemini model, used only if `BlackBoard-arch_KEY` is set. |
+| `GROQ_API_KEY` | Yes | — | Powers the Verifier, Correction, and Claim Extraction agents. |
+| `PROBE_PATH` | Yes (for `/ask`) | — | Path to a trained probe `.joblib` from `probe/train_probe.py`. |
+| `PROBE_LAYER` | No | `20` | Must match the layer the probe was trained on. |
+| `QWEN_MODEL_ID` | No | `Qwen/Qwen2.5-7B-Instruct` | Model the feature extractor loads. |
+| `CHROMA_PERSIST_DIRECTORY` | No | `./halluciguard_chroma` | Blackboard's ChromaDB store (knowledge + memory). |
+| `GROQ_MODEL` | No | `openai/gpt-oss-120b` | Groq model for the Blackboard agents. |
 
-Other pipeline constants (`RETRIEVAL_TOP_K`, `MEMORY_TOP_K`, `MAX_VERIFICATION_ROUNDS`, similarity thresholds) are set in `blackboard_core.py`.
+A CUDA GPU is required for the probe half (`QwenResidualFeatureExtractor`
+refuses to fall back to CPU by design).
 
-## Managing the knowledge base
+## 1. Train the probe (one-time, if you don't already have `probe.joblib`)
 
-`blackboard_core.py` exposes helper functions for populating and clearing ChromaDB collections:
+```bash
+cd probe
+python Dataset_builder.py --local_path HaluEval-main/data --max_questions 100 \
+    --output_path halueval_manual_features.pt
+python train_probe.py --data halueval_manual_features.pt --output probe.joblib
+```
 
-- `add_knowledge_documents(documents, metadatas=None, ids=None)` — add evidence documents to the knowledge base.
-- `reset_knowledge_collection()` — clear all knowledge documents.
-- `reset_memory_collection()` — clear all episodic memory (previously verified claims).
+## 2. Run the merged pipeline
+
+### Command line
+
+```bash
+export GROQ_API_KEY=your_key_here
+python pipeline.py --probe probe/probe.joblib \
+    --questions "What year was the Eiffel Tower completed?" "Who wrote Hamlet?"
+```
+
+Each question is generated, scored, and — if flagged — run through the
+Blackboard. Output shows the risk score, verdict, and final response.
+
+### As a service
+
+```bash
+export GROQ_API_KEY=your_key_here
+export PROBE_PATH=probe/probe.joblib
+uvicorn unified_server:app --host 0.0.0.0 --port 8000
+```
+
+```bash
+curl -X POST http://localhost:8000/ask \
+    -H "Content-Type: application/json" \
+    -d '{"question": "What year was the Eiffel Tower completed?"}'
+```
+
+`GET /health` reports whether the probe is loaded, plus the Blackboard's
+knowledge/memory doc counts and active threshold.
+
+## 3. Already have an answer from elsewhere?
+
+Use `pipeline.py`'s `run_on_qa(question, answer)` (or the
+`/score_and_mitigate` endpoint) to score and mitigate a `(question, answer)`
+pair without generating a new answer — e.g. if a different model produced
+the response and you just want this pipeline to risk-score and ground it.
 
 ## Notes
 
-- `server.py` is an adaptation of the pipeline logic originally developed in `blackboard_imp2.ipynb`; no pipeline behavior was changed in the port — see the `CHANGES FROM THE NOTEBOOK` note at the bottom of `blackboard_core.py` for the (non-logic) differences.
-- The `BlackBoard-arch_chroma/` directory contains a working ChromaDB store. If you're pushing this repo publicly, consider whether you want to commit it as-is, ship it empty, or add it to `.gitignore` and let it be recreated on first run.
+- `probe/infer_probe.py` still works standalone (score a `.pt` file of
+  precomputed features, or run questions through the probe with no
+  Blackboard involved) — nothing there was changed.
+- `blackboard/server.py` still works standalone too (bring your own
+  `confidence_score`) — also unchanged. `unified_server.py`'s `/analyze`
+  route is the same call, just hosted alongside the new `/ask` route.
+- The risk threshold (`blackboard_core.HALLUCINATION_RISK_THRESHOLD`,
+  default `0.70`) is shared by both halves once merged: it's the same
+  number the probe's score is compared against. Override it per-run with
+  `pipeline.py --threshold` or `HallucinationMitigationPipeline(...,
+  override_threshold=...)`.
