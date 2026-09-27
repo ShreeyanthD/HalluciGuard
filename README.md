@@ -156,7 +156,23 @@ curl -X POST http://localhost:8000/ask \
 ```
 
 `GET /health` reports whether the probe is loaded, plus the Blackboard's
-knowledge/memory doc counts and active threshold.
+knowledge/memory doc counts, active threshold, and whether the web-search
+fallback is enabled.
+
+### Frontend
+
+`blackboard/static/index.html` (served at `/` by `unified_server.py`) now
+has two modes, toggled at the top of the input panel:
+
+- **Bring your own answer** — the original demo: type a prompt, a
+  response, and a confidence score, hits `/analyze`.
+- **Ask the model** — new: type only a question. This calls `/ask_trace`,
+  which runs the full merged pipeline (Qwen generates, the probe scores
+  it, the Blackboard verifies if flagged) and renders the same stage-by-
+  stage trace, plus the generated answer and its risk score up top. If
+  the response turns out to already be an abstention, or gets corrected
+  after a web search, that's shown as a distinct step in the trace rather
+  than folded into the generic "Correct" stage.
 
 ## 3. Already have an answer from elsewhere?
 

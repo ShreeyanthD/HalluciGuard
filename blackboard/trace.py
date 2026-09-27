@@ -1,0 +1,115 @@
+"""
+trace.py — turns blackboard_core.process_response()'s raw return value into
+the stage-by-stage shape blackboard/static/index.html renders.
+
+Presentation only — no pipeline logic lives here. Shared by server.py
+(Blackboard-only) and unified_server.py (merged pipeline), so both expose
+identical trace shapes to the frontend.
+"""
+
+from typing import Any, Dict
+
+
+def build_trace(result: Dict[str, Any]) -> Dict[str, Any]:
+    if result["status"] == "SKIPPED_LOW_RISK":
+        return {
+            "skipped": True,
+            "abstained": False,
+            "confidence_score": result["confidence_score"],
+            "threshold": result["threshold"],
+            "final_response": result["final_response"],
+        }
+
+    if result["status"] == "ABSTENTION":
+        ad = result.get("abstention_detection") or {}
+        return {
+            "skipped": False,
+            "abstained": True,
+            "confidence_score": result["confidence_score"],
+            "threshold": result["threshold"],
+            "final_response": result["final_response"],
+            "abstention_method": ad.get("method"),
+            "abstention_explanation": ad.get("explanation"),
+        }
+
+    orch = result["orchestrator_result"]
+    bb = orch["blackboard"]
+    memory_result = orch["memory_result"]
+    verification_source = orch["verification_source"]
+    verification = result["verification_result"] or {}
+    correction = result["correction_result"]
+
+    memory_stage = {
+        "hit": bool(memory_result.get("match_found")),
+        "detail": (
+            f"reused a similar past verdict (distance={memory_result['best_match']['distance']:.3f})"
+            if memory_result.get("match_found")
+            else "no cached verdict for this claim"
+        ),
+    }
+
+    # Retrieval only actually ran this request if the memory shortcut wasn't taken.
+    retrieved = bb.get("retrieved_evidence", []) if verification_source != "episodic_memory" else []
+    retrieve_stage = {
+        "evidence": [
+            {"id": e["id"], "text": e["text"], "distance": e.get("distance")}
+            for e in retrieved
+        ],
+        "reused_from_memory": verification_source == "episodic_memory",
+        "web_search_used": bool(bb.get("web_search_used")),
+    }
+
+    verify_stage = {
+        "verdict": verification.get("verdict"),
+        "explanation": verification.get("explanation"),
+        "supporting_evidence_ids": verification.get("supporting_evidence_ids", []),
+        "confidence": verification.get("confidence"),
+        "source": verification_source,
+    }
+
+    verdict = verify_stage["verdict"]
+    if correction and correction.get("mode") == "abstain":
+        correct_stage = {
+            "action": "abstained",
+            "summary": correction.get("correction_summary"),
+            "output": correction.get("corrected_response"),
+        }
+    elif correction:
+        correct_stage = {
+            "action": "corrected",
+            "summary": correction.get("correction_summary"),
+            "output": correction.get("corrected_response"),
+        }
+    elif verdict == "SUPPORTED":
+        correct_stage = {
+            "action": "unchanged",
+            "summary": "claim matched cited evidence",
+            "output": result["final_response"],
+        }
+    elif verdict == "CONTRADICTED" and verification_source == "episodic_memory":
+        correct_stage = {
+            "action": "corrected (from memory)",
+            "summary": "reused a previously corrected response",
+            "output": result["final_response"],
+        }
+    else:
+        correct_stage = {
+            "action": "unchanged",
+            "summary": "",
+            "output": result["final_response"],
+        }
+
+    return {
+        "skipped": False,
+        "abstained": False,
+        "confidence_score": result["confidence_score"],
+        "threshold": result["threshold"],
+        "extracted_claim": result["extracted_claim"],
+        "flagged_span": result["flagged_span"],
+        "extraction_reason": result["extraction_reason"],
+        "memory": memory_stage,
+        "retrieve": retrieve_stage,
+        "verify": verify_stage,
+        "correct": correct_stage,
+        "final_response": result["final_response"],
+    }
