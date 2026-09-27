@@ -144,6 +144,7 @@ def health() -> Dict[str, Any]:
         "knowledge_docs": bc.knowledge_collection.count(),
         "memory_docs": bc.memory_collection.count(),
         "threshold": bc.HALLUCINATION_RISK_THRESHOLD,
+        "web_search_fallback_enabled": bc.web_search_agent.enabled,
         "probe_loaded": _pipeline is not None,
         "probe_path": PROBE_PATH,
     }
