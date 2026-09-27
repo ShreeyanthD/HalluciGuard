@@ -34,7 +34,7 @@ def build_trace(result: Dict[str, Any]) -> Dict[str, Any]:
 
     orch = result["orchestrator_result"]
     bb = orch["blackboard"]
-    memory_result = orch["memory_result"]
+    memory_result = orch.get("memory_result") or {}
     verification_source = orch["verification_source"]
     verification = result["verification_result"] or {}
     correction = result["correction_result"]
