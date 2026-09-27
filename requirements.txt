@@ -4,6 +4,7 @@ uvicorn
 chromadb
 openai
 google-genai
+requests
 
 # Probe / detection side
 torch

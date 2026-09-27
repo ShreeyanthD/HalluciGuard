@@ -31,20 +31,53 @@ scaler.transform() -> classifier.predict_proba()                     [trained pr
    ▼
 blackboard_core.process_response(prompt, response, prob_hallucinated) [blackboard/blackboard_core.py]
    │
-   ├─ prob_hallucinated < 0.70  ─────────────────────────► response returned unchanged
+   ├─ prob_hallucinated < 0.70  ─────────────────────────► response returned unchanged (status=SKIPPED_LOW_RISK)
    │
    └─ prob_hallucinated ≥ 0.70
-        ├─ ClaimExtractor   – picks the single riskiest claim
-        ├─ MemoryAgent      – checks episodic memory for a past verdict
-        ├─ RetrievalAgent   – (if no memory hit) pulls top-k evidence docs
-        ├─ VerifierAgent    – SUPPORTED / CONTRADICTED / INSUFFICIENT
-        └─ CorrectionAgent  – rewrites (if contradicted) or hedges (if
-                              insufficient); passes through unchanged if
-                              supported
+        ├─ AbstentionDetector  – is this already an honest "I don't know"? ─► if yes: status=ABSTENTION,
+        │                                                                      returned unchanged, Blackboard skipped
+        └─ if not an abstention:
+             ├─ ClaimExtractor   – picks the single riskiest claim
+             ├─ MemoryAgent      – checks episodic memory for a past verdict
+             ├─ RetrievalAgent   – (if no memory hit) pulls top-k evidence docs, up to
+             │                     MAX_VERIFICATION_ROUNDS rounds
+             ├─ WebSearchAgent   – (if still INSUFFICIENT after local rounds, and enabled)
+             │                     live web search, adds results as evidence, re-verifies once
+             ├─ VerifierAgent    – SUPPORTED / CONTRADICTED / INSUFFICIENT
+             └─ CorrectionAgent  – .correct() rewrites a CONTRADICTED claim using evidence;
+                                   .abstain() honestly hedges if still INSUFFICIENT; passes
+                                   through unchanged if SUPPORTED
    │
    ▼
-final_response  (+ full trace: extracted claim, verdict, evidence, etc.)
+final_response  (+ full trace: extracted claim, verdict, evidence, abstention_detection, etc.)
 ```
+
+### Three behaviors worth calling out explicitly
+
+1. **Insufficient evidence → an honest abstention, not a bracketed note.**
+   Previously, an unresolved claim was left in the response with `[Note: ... could
+   not be verified ...]` appended. Now `CorrectionAgent.abstain()` rewrites the
+   response so it naturally says the claim couldn't be confirmed, without
+   inventing a replacement fact.
+
+2. **Insufficient local evidence → try a live web search before giving up.**
+   If the knowledge base's retrieval rounds all come back `INSUFFICIENT`,
+   `WebSearchAgent` (Tavily) does one live search for the claim, adds the
+   results as evidence, and gives `VerifierAgent` one more pass. Only if
+   that *still* comes back `INSUFFICIENT` does it fall through to the
+   abstention above. This is opt-in — see `TAVILY_API_KEY` below; if unset,
+   this step is skipped automatically and behavior falls straight through
+   to (1).
+
+3. **An abstention the model already gave shouldn't be relabeled a hallucination.**
+   The probe's risk score reflects how *unusual* a response's activations
+   look — an honest "I don't know" can score high simply because it's an
+   atypical pattern, not because anything was fabricated. `AbstentionDetector`
+   runs before claim extraction: a keyword check first, an LLM classifier
+   fallback for paraphrased abstentions it might miss. If the response is
+   already an abstention, `process_response()` returns `status="ABSTENTION"`
+   and leaves it untouched — the Blackboard never runs on it, so it can't
+   accidentally "correct" an honest hedge into a confident invented answer.
 
 ## Project structure
 
@@ -80,6 +113,8 @@ Environment variables:
 | `QWEN_MODEL_ID` | No | `Qwen/Qwen2.5-7B-Instruct` | Model the feature extractor loads. |
 | `CHROMA_PERSIST_DIRECTORY` | No | `./halluciguard_chroma` | Blackboard's ChromaDB store (knowledge + memory). |
 | `GROQ_MODEL` | No | `openai/gpt-oss-120b` | Groq model for the Blackboard agents. |
+| `TAVILY_API_KEY` | No | — | Enables the web-search fallback (behavior 2 above). Unset = skipped automatically, no error. |
+| `WEB_SEARCH_RESULTS` | No | `5` | Max web results pulled into evidence per fallback search. |
 
 A CUDA GPU is required for the probe half (`QwenResidualFeatureExtractor`
 refuses to fall back to CPU by design).
@@ -132,6 +167,11 @@ the response and you just want this pipeline to risk-score and ground it.
 
 ## Notes
 
+- Every result (`pipeline.py` output, `/ask`, `/score_and_mitigate`, `/analyze`)
+  now carries a `status` of `SKIPPED_LOW_RISK`, `ABSTENTION`, or
+  `BLACKBOARD_PROCESSED`, plus an `abstention_detection` field (`None` when
+  skipped for low risk; `{"is_abstention": ..., "method": "heuristic"|"llm",
+  "explanation": ...}` otherwise).
 - `probe/infer_probe.py` still works standalone (score a `.pt` file of
   precomputed features, or run questions through the probe with no
   Blackboard involved) — nothing there was changed.
