@@ -9,7 +9,7 @@ Run:
 Then open http://localhost:8000
 """
 
-from typing import Any, Dict
+from typing import Any, Dict, List, Optional
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -33,6 +33,47 @@ class AnalyzeRequest(BaseModel):
     prompt: str
     response: str
     confidence_score: float
+
+
+class AddDocumentRequest(BaseModel):
+    text: str
+    title: Optional[str] = None
+    source: Optional[str] = None
+
+
+class AddDocumentsRequest(BaseModel):
+    documents: List[str]
+    metadatas: Optional[List[Dict[str, Any]]] = None
+
+
+@app.post("/documents")
+def add_document(req: AddDocumentRequest) -> Dict[str, Any]:
+    """Add a single document to the knowledge base (used by the 'Add to
+    knowledge base' panel in the frontend)."""
+    if not req.text or not req.text.strip():
+        raise HTTPException(status_code=400, detail="text is required.")
+
+    metadata: Dict[str, Any] = {"source": req.source or "manual"}
+    if req.title:
+        metadata["title"] = req.title
+
+    try:
+        ids = bc.add_knowledge_documents(documents=[req.text], metadatas=[metadata])
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+    return {"id": ids[0], "knowledge_docs": bc.knowledge_collection.count()}
+
+
+@app.post("/documents/batch")
+def add_documents(req: AddDocumentsRequest) -> Dict[str, Any]:
+    """Add multiple documents to the knowledge base in one call."""
+    try:
+        ids = bc.add_knowledge_documents(documents=req.documents, metadatas=req.metadatas)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+    return {"ids": ids, "knowledge_docs": bc.knowledge_collection.count()}
 
 
 @app.post("/analyze")

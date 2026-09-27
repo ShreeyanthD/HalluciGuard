@@ -34,10 +34,10 @@ def build_trace(result: Dict[str, Any]) -> Dict[str, Any]:
 
     orch = result["orchestrator_result"]
     bb = orch["blackboard"]
-    memory_result = orch["memory_result"]
-    verification_source = orch["verification_source"]
+    memory_result = orch.get("memory_result") or {}
+    verification_source = orch.get("verification_source", "retrieval_and_gemini")
     verification = result["verification_result"] or {}
-    correction = result["correction_result"]
+    correction = result["correction_result"] or {}
 
     memory_stage = {
         "hit": bool(memory_result.get("match_found")),
@@ -52,7 +52,17 @@ def build_trace(result: Dict[str, Any]) -> Dict[str, Any]:
     retrieved = bb.get("retrieved_evidence", []) if verification_source != "episodic_memory" else []
     retrieve_stage = {
         "evidence": [
-            {"id": e["id"], "text": e["text"], "distance": e.get("distance")}
+            {
+                "id": e["id"],
+                "text": e["text"],
+                "distance": e.get("distance"),
+                # Web-search hits carry a url/title/source in metadata;
+                # knowledge-base hits generally don't. The frontend uses
+                # this to show a link instead of the full scraped text.
+                "url": (e.get("metadata") or {}).get("url"),
+                "title": (e.get("metadata") or {}).get("title"),
+                "source": (e.get("metadata") or {}).get("source"),
+            }
             for e in retrieved
         ],
         "reused_from_memory": verification_source == "episodic_memory",

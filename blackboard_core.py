@@ -369,7 +369,7 @@ class MemoryAgent:
                 "id": record_id,
                 "claim": document,
                 "metadata": metadata or {},
-                "distance": float(distance),
+                "distance": max(0.0, float(distance)),
             })
 
         best_match = matches[0] if matches else None
@@ -464,7 +464,7 @@ class RetrievalAgent:
                 "id": record_id,
                 "text": document,
                 "metadata": metadata or {},
-                "distance": float(distance),
+                "distance": max(0.0, float(distance)),
             })
 
         blackboard.write("retrieved_evidence", evidence, author=self.__class__.__name__)
