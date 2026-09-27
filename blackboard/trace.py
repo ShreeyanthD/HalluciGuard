@@ -35,9 +35,9 @@ def build_trace(result: Dict[str, Any]) -> Dict[str, Any]:
     orch = result["orchestrator_result"]
     bb = orch["blackboard"]
     memory_result = orch.get("memory_result") or {}
-    verification_source = orch["verification_source"]
+    verification_source = orch.get("verification_source", "retrieval_and_gemini")
     verification = result["verification_result"] or {}
-    correction = result["correction_result"]
+    correction = result["correction_result"] or {}
 
     memory_stage = {
         "hit": bool(memory_result.get("match_found")),
