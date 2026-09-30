@@ -1,0 +1,12 @@
+{"knowledge": "William Shakespeare wrote the tragedy Hamlet around 1600.", "question": "Who wrote the play Hamlet?", "right_answer": "Shakespeare", "hallucinated_answer": "n/a"}
+{"knowledge": "Canberra is the capital city of Australia, chosen as a compromise between Sydney and Melbourne.", "question": "What is the capital of Australia?", "right_answer": "Canberra", "hallucinated_answer": "n/a"}
+{"knowledge": "Mars is called the Red Planet because of the iron oxide on its surface.", "question": "Which planet is known as the Red Planet?", "right_answer": "Mars", "hallucinated_answer": "n/a"}
+{"knowledge": "The Eiffel Tower is a wrought-iron tower in Paris, France, completed in 1889.", "question": "In which city is the Eiffel Tower located?", "right_answer": "Paris", "hallucinated_answer": "n/a"}
+{"knowledge": "Leonardo da Vinci painted the Mona Lisa in the early 16th century.", "question": "Who painted the Mona Lisa?", "right_answer": "Leonardo", "hallucinated_answer": "n/a"}
+{"knowledge": "The chemical symbol for gold is Au, from the Latin word aurum.", "question": "What is the chemical symbol for gold?", "right_answer": "Au", "hallucinated_answer": "n/a"}
+{"knowledge": "The Pacific Ocean is the largest and deepest of Earth's oceans.", "question": "Which ocean is the largest?", "right_answer": "Pacific", "hallucinated_answer": "n/a"}
+{"knowledge": "Albert Einstein published the theory of general relativity in 1915.", "question": "Who developed the theory of general relativity?", "right_answer": "Einstein", "hallucinated_answer": "n/a"}
+{"knowledge": "Mount Everest is Earth's highest mountain above sea level.", "question": "What is the tallest mountain above sea level?", "right_answer": "Everest", "hallucinated_answer": "n/a"}
+{"knowledge": "Portuguese is the official and most widely spoken language of Brazil.", "question": "Which language is primarily spoken in Brazil?", "right_answer": "Portuguese", "hallucinated_answer": "n/a"}
+{"knowledge": "Alexander Fleming discovered penicillin in 1928.", "question": "Who discovered penicillin?", "right_answer": "Fleming", "hallucinated_answer": "n/a"}
+{"knowledge": "Jupiter is the largest planet in the Solar System.", "question": "What is the largest planet in our solar system?", "right_answer": "Jupiter", "hallucinated_answer": "n/a"}
