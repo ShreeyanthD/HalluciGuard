@@ -12,6 +12,7 @@ class QwenResidualFeatureExtractor:
         model_id="Qwen/Qwen2.5-7B-Instruct",
         layer=20,
         device="cuda",
+        multi_gpu="auto",
     ):
         # Hard requirement: refuse to run on CPU. "auto" device_map (the
         # previous default) can silently offload layers to CPU/disk when
@@ -39,20 +40,31 @@ class QwenResidualFeatureExtractor:
         # slice out the generated-answer span uniformly across the batch)
         self.tokenizer.padding_side = "left"
 
-        # Pin everything to the requested GPU explicitly instead of
-        # device_map="auto", which is allowed to spill layers onto CPU/disk
-        # under memory pressure. Use an explicit index (not bare "cuda") and
-        # cap max_memory on that device so bitsandbytes/accelerate can never
-        # silently reassign any module to cpu/disk — it will raise an OOM
-        # instead if the model doesn't fit.
-        cuda_index = torch.cuda.current_device() if device == "cuda" else int(str(device).split(":")[-1])
-        gpu_key = f"cuda:{cuda_index}"
-        total_mem_gb = torch.cuda.get_device_properties(cuda_index).total_memory / (1024**3)
+        # Loading policy: GPUs only, never CPU/disk (no "cpu" key in max_memory,
+        # so accelerate raises instead of silently offloading).
+        #   - 2+ GPUs visible -> split the layers evenly across all of them
+        #     ("balanced"). A 7B model in bf16 is ~15 GB and does not fit on a
+        #     single 15 GB card (e.g. Kaggle/Colab T4), so this is required there.
+        #   - 1 GPU           -> pin everything to it, as before.
+        n_gpus = torch.cuda.device_count()
+        use_multi = n_gpus > 1 if multi_gpu == "auto" else bool(multi_gpu)
+        if use_multi and n_gpus > 1:
+            max_memory = {
+                i: f"{torch.cuda.get_device_properties(i).total_memory / (1024**3) * 0.92:.1f}GiB"
+                for i in range(n_gpus)
+            }
+            device_map = "balanced"
+            print(f"[QwenResidualFeatureExtractor] sharding across {n_gpus} GPUs: {max_memory}")
+        else:
+            cuda_index = torch.cuda.current_device() if device == "cuda" else int(str(device).split(":")[-1])
+            total_mem_gb = torch.cuda.get_device_properties(cuda_index).total_memory / (1024**3)
+            max_memory = {cuda_index: f"{total_mem_gb:.1f}GiB"}
+            device_map = {"": cuda_index}
         self.model = AutoModelForCausalLM.from_pretrained(
             model_id,
-            torch_dtype=torch.bfloat16,
-            device_map={"": cuda_index},
-            max_memory={cuda_index: f"{total_mem_gb:.1f}GiB"},
+            dtype=torch.bfloat16,
+            device_map=device_map,
+            max_memory=max_memory,
         )
         self.model.eval()
 
@@ -70,11 +82,16 @@ class QwenResidualFeatureExtractor:
         self._hook_handle = None
 
         # Default system prompt used everywhere a chat-formatted generation
-        # prompt is built. Forces short, single-word answers so generated
-        # spans stay small and consistent across samples.
+        # prompt is built. Keeps answers to a single word so generated spans
+        # stay small and consistent across samples. The model is explicitly
+        # allowed to abstain with the single word "Unknown" instead of being
+        # pushed to produce an answer no matter what (forced answers are a
+        # direct cause of hallucinations).
         self.default_system_prompt = (
             "Answer the question in a single word only. "
-            "Do not use full sentences, explanations, or punctuation."
+            "Do not use full sentences, explanations, or punctuation. "
+            "If you do not know the answer or are not sure, "
+            "answer with the single word: Unknown"
         )
 
     def _hook_fn(self, module, input, output):
@@ -99,7 +116,7 @@ class QwenResidualFeatureExtractor:
         self._register_hook()
         try:
             with torch.no_grad():
-                self.model(**inputs)
+                self.model.model(**inputs)
         finally:
             self._remove_hook()
 
@@ -173,7 +190,7 @@ class QwenResidualFeatureExtractor:
         self._register_hook()
         try:
             with torch.no_grad():
-                self.model(input_ids=full_input_ids)
+                self.model.model(input_ids=full_input_ids)
         finally:
             self._remove_hook()
 
@@ -293,7 +310,7 @@ class QwenResidualFeatureExtractor:
         self._register_hook()
         try:
             with torch.no_grad():
-                self.model(input_ids=output_ids, attention_mask=full_attention_mask)
+                self.model.model(input_ids=output_ids, attention_mask=full_attention_mask)
         finally:
             self._remove_hook()
 
@@ -354,7 +371,7 @@ class QwenResidualFeatureExtractor:
         self._register_hook()
         try:
             with torch.no_grad():
-                self.model(**full_inputs)
+                self.model.model(**full_inputs)
         finally:
             self._remove_hook()
 
