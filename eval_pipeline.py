@@ -98,14 +98,57 @@ def _first(row: Dict[str, Any], names: List[str]) -> Any:
     return None
 
 
+def parse_indices(spec: Optional[str]) -> Optional[List[int]]:
+    """'0,5,10-14' -> [0, 5, 10, 11, 12, 13, 14]. Order is kept, duplicates dropped."""
+    if not spec:
+        return None
+    out: List[int] = []
+    for part in spec.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        if "-" in part:
+            a, b = part.split("-", 1)
+            out.extend(range(int(a), int(b) + 1))
+        else:
+            out.append(int(part))
+    return list(dict.fromkeys(out)) or None
+
+
 def load_dataset(path: str, fmt: str = "auto", q_field=None, a_field=None, k_field=None,
-                 limit: Optional[int] = None, seed: int = 0, shuffle: bool = False) -> List[Dict[str, Any]]:
+                 limit: Optional[int] = None, seed: int = 0, shuffle: bool = False,
+                 start: int = 0, indices: Optional[List[int]] = None) -> List[Dict[str, Any]]:
+    """Selection (all indexes are 0-based row numbers in the ORIGINAL file):
+         indices=[3, 17, 42]  -> exactly those rows, in that order
+         start=100, limit=50  -> rows 100..149
+         shuffle=True         -> random sample of `limit` rows (seeded)
+       Each record keeps its original row number in rec["id"]."""
     rows = _read_rows(path)
-    if shuffle:
-        random.Random(seed).shuffle(rows)
+    n_rows = len(rows)
+
+    # original index of each row (a stage-1 file stores it in "id"; raw files use position)
+    orig = []
+    for i, row in enumerate(rows):
+        rid = row.get("id", i) if isinstance(row, dict) else i
+        try:
+            orig.append(int(rid))
+        except (TypeError, ValueError):
+            orig.append(i)
+
+    if indices is not None:
+        pos = {o: i for i, o in enumerate(orig)}
+        missing = [k for k in indices if k not in pos]
+        if missing:
+            raise IndexError(f"Indexes not in the file (it has {n_rows} rows): {missing[:10]}")
+        order = [pos[k] for k in indices]
+    else:
+        order = list(range(n_rows))[max(0, start):]
+        if shuffle:
+            random.Random(seed).shuffle(order)
 
     out = []
-    for i, row in enumerate(rows):
+    for i in order:
+        row = rows[i]
         q = _first(row, [q_field, "question", "prompt", "query"])
         gold = _first(row, [a_field, "right_answer", "gold", "answer", "answers", "target"])
         know = _first(row, [k_field, "knowledge", "context", "evidence"])
@@ -117,18 +160,20 @@ def load_dataset(path: str, fmt: str = "auto", q_field=None, a_field=None, k_fie
             continue
         golds = gold if isinstance(gold, list) else [gold]
         rec = {
-            "id": row.get("id", i),
+            "id": orig[i],
             "question": str(q).strip(),
             "gold": [str(g).strip() for g in golds if str(g).strip()],
             "knowledge": str(know).strip() if know else "",
         }
+        if row.get("hallucinated_answer"):
+            rec["hallucinated_answer"] = str(row["hallucinated_answer"]).strip()
         # If the file already holds model answers (stage-1 output), keep them.
         if row.get("answer") is not None and "gold" in row:
             rec["answer"] = str(row["answer"])
         if row.get("prob_hallucinated") is not None:
             rec["prob_hallucinated"] = float(row["prob_hallucinated"])
         out.append(rec)
-        if limit and len(out) >= limit:
+        if indices is None and limit and len(out) >= limit:
             break
     if not out:
         raise ValueError("No usable rows found (need a question and a gold answer per row).")
@@ -435,7 +480,11 @@ def main():
     src.add_argument("--answers_file", help="Stage-1 output (generations.jsonl) — skips generation")
     src.add_argument("--format", default="auto", choices=["auto", "halueval", "generic"])
     src.add_argument("--q_field"); src.add_argument("--a_field"); src.add_argument("--k_field")
-    src.add_argument("--limit", type=int, default=None)
+    src.add_argument("--limit", type=int, default=None, help="how many questions to use")
+    src.add_argument("--start", type=int, default=0, help="first row to use (0-based), with --limit")
+    src.add_argument("--indices", default=None,
+                     help="exact 0-based row numbers, e.g. '0,5,12' or '10-19,42' (overrides --start/--limit/--shuffle)")
+    src.add_argument("--indices_file", default=None, help="text file with indexes (commas/newlines/ranges)")
     src.add_argument("--shuffle", action="store_true")
     src.add_argument("--seed", type=int, default=0)
 
@@ -471,14 +520,20 @@ def main():
     out_dir.mkdir(parents=True, exist_ok=True)
 
     # ---- load / generate -------------------------------------------------
+    spec = args.indices
+    if args.indices_file:
+        spec = (spec + "," if spec else "") + ",".join(Path(args.indices_file).read_text().split())
+    indices = parse_indices(spec)
+
     if args.answers_file:
-        records = load_dataset(args.answers_file, "generic", limit=args.limit, seed=args.seed, shuffle=args.shuffle)
+        records = load_dataset(args.answers_file, "generic", limit=args.limit, seed=args.seed,
+                               shuffle=args.shuffle, start=args.start, indices=indices)
         if any("answer" not in r for r in records):
             ap.error("--answers_file rows need an 'answer' field (use stage-1 output, or add model answers).")
         print(f"Loaded {len(records)} records with answers from {args.answers_file}")
     else:
         records = load_dataset(args.dataset, args.format, args.q_field, args.a_field, args.k_field,
-                               args.limit, args.seed, args.shuffle)
+                               args.limit, args.seed, args.shuffle, start=args.start, indices=indices)
         print(f"Loaded {len(records)} questions from {args.dataset}")
         records = run_generation_stage(records, args)
         with open(out_dir / "generations.jsonl", "w", encoding="utf-8") as f:
@@ -487,6 +542,8 @@ def main():
         print(f"Saved generations -> {out_dir / 'generations.jsonl'}")
         if args.generate_only:
             return
+
+    print("Using dataset rows:", [r["id"] for r in records])
 
     # ---- blackboard ------------------------------------------------------
     rows, bc = run_blackboard_stage(records, args)
@@ -502,10 +559,10 @@ def main():
     # ---- save ------------------------------------------------------------
     with open(out_dir / "per_item.csv", "w", newline="", encoding="utf-8") as f:
         w = csv.writer(f)
-        w.writerow(["id", "question", "gold", "prob_hallucinated", "raw_answer", "raw_label",
+        w.writerow(["row_index", "question", "gold", "halueval_hallucinated_answer", "prob_hallucinated", "raw_answer", "raw_label",
                     "status", "verdict", "evidence_source", "final_response", "final_label", "error"])
         for r, x, bl, wl in zip(records, rows, base_labels, bb_labels):
-            w.writerow([r["id"], r["question"], " | ".join(r["gold"]), r.get("prob_hallucinated", ""),
+            w.writerow([r["id"], r["question"], " | ".join(r["gold"]), r.get("hallucinated_answer", ""), r.get("prob_hallucinated", ""),
                         r["answer"], bl, x["status"], x["verdict"] or "", x["evidence_source"] or "",
                         x["final_response"], wl, x["error"] or ""])
     with open(out_dir / "metrics.json", "w") as f:
