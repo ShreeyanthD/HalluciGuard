@@ -199,3 +199,38 @@ the response and you just want this pipeline to risk-score and ground it.
   number the probe's score is compared against. Override it per-run with
   `pipeline.py --threshold` or `HallucinationMitigationPipeline(...,
   override_threshold=...)`.
+
+## Evaluating the Blackboard (with vs. without)
+
+`eval_pipeline.py` runs the same questions through two arms — the base
+model's raw answer (**without** blackboard) and the answer after
+`process_response()` (**with** blackboard) — and grades each as
+`CORRECT`, `ABSTAINED` or `HALLUCINATED`. Headline metric:
+`hallucination_rate = wrong answers / all questions`, plus a paired-bootstrap
+95% CI on the drop.
+
+```bash
+# full run (GPU box, GROQ_API_KEY set)
+python eval_pipeline.py --dataset HaluEval-main/data/qa_data.json \
+    --probe probe/probe.joblib --limit 200
+
+# split it: generate on Colab, run the blackboard anywhere
+python eval_pipeline.py --dataset qa_data.json --probe probe.joblib --generate_only --out_dir eval_runs/exp1
+python eval_pipeline.py --answers_file eval_runs/exp1/generations.jsonl --out_dir eval_runs/exp1
+
+# no probe: push every answer through the blackboard
+python eval_pipeline.py --answers_file eval_runs/exp1/generations.jsonl --threshold 0
+
+python eval_selftest.py   # offline plumbing test (no GPU / API key)
+```
+
+Outputs go to `out_dir`: `metrics.json`, `per_item.csv` (every question, raw
+vs. final answer, labels, status), `summary.md`. The eval uses its own
+ChromaDB (`--chroma_dir`, default `./eval_chroma`) so your real store is never
+touched. The knowledge base is built from the dataset's `knowledge` field
+(pooled across all questions); `--no_knowledge` runs the empty-KB ablation and
+`--isolate_memory` stops verdicts leaking between questions.
+
+**Abstention:** the base model's system prompt now allows the single word
+`Unknown` instead of forcing an answer, and `AbstentionDetector` treats a bare
+`Unknown` / `IDK` as an abstention.
