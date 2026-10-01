@@ -20,11 +20,24 @@ def build_trace(result: Dict[str, Any]) -> Dict[str, Any]:
             "final_response": result["final_response"],
         }
 
-    if result["status"] == "ABSTENTION":
+    if result["status"] in ("ABSTENTION", "ABSTENTION_RESOLVED"):
         ad = result.get("abstention_detection") or {}
+        orch = result.get("orchestrator_result") or {}
+        bb = orch.get("blackboard") or {}
+        answer = result.get("verification_result") or {}
         return {
             "skipped": False,
             "abstained": True,
+            "resolved": result["status"] == "ABSTENTION_RESOLVED",
+            "original_response": result.get("original_response"),
+            "evidence": [
+                {"id": e["id"], "text": e["text"], "distance": e.get("distance"),
+                 "url": (e.get("metadata") or {}).get("url")}
+                for e in bb.get("retrieved_evidence", [])
+            ],
+            "web_search_used": bool(bb.get("web_search_used")),
+            "answer_explanation": answer.get("explanation"),
+            "supporting_evidence_ids": answer.get("supporting_evidence_ids", []),
             "confidence_score": result["confidence_score"],
             "threshold": result["threshold"],
             "final_response": result["final_response"],

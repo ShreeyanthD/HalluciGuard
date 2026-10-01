@@ -299,6 +299,18 @@ _ABSTENTION_PHRASES = (
 )
 
 
+# Bare, short-form abstentions. The probe's generation prompt tells the model
+# to answer with the single word "Unknown" when unsure, so this is the most
+# common abstention in practice. Matched against the WHOLE normalized response
+# (not as a substring) so "Unknown Pleasures" or "None of the above is..." are
+# not mistaken for abstentions.
+_ABSTENTION_EXACT = {
+    "unknown", "unsure", "unclear", "n/a", "na", "none", "idk",
+    "no idea", "not known", "don't know", "do not know", "unanswerable",
+    "i don't know", "i do not know",
+}
+
+
 class AbstentionDetector:
     """Tells apart 'the model doesn't know and said so' from 'the model
     made something up.'
@@ -322,9 +334,13 @@ class AbstentionDetector:
         text = response.strip().lower()
         if not text:
             return False
+        # Whole-response match for bare tokens like "Unknown" / "Unknown."
+        normalized = re.sub(r"[^\w\s/']", "", text).strip()
+        if normalized in _ABSTENTION_EXACT:
+            return True
         return any(phrase in text for phrase in _ABSTENTION_PHRASES)
 
-    def is_abstention(self, response: str) -> Dict[str, Any]:
+    def is_abstention(self, response: str, allow_llm: bool = True) -> Dict[str, Any]:
         if self._heuristic_match(response):
             return {
                 "is_abstention": True,
@@ -332,7 +348,7 @@ class AbstentionDetector:
                 "explanation": "Matched a known abstention phrase.",
             }
 
-        if not self.use_llm_fallback:
+        if not (self.use_llm_fallback and allow_llm):
             return {
                 "is_abstention": False,
                 "method": "heuristic",
@@ -1417,10 +1433,12 @@ def process_response(prompt: str, response: str, confidence_score: float) -> Dic
     """
     Top-level HalluciGuard interface — this is the integration point.
 
-    - score below HALLUCINATION_RISK_THRESHOLD: response returned unchanged,
-      no pipeline work occurs.
-    - score at or above threshold: extract the risky claim and run the full
-      Blackboard pipeline.
+    - abstention ("Unknown", "I don't know"): ALWAYS routed to the Blackboard
+      to be answered from evidence, regardless of score.
+    - otherwise, score below HALLUCINATION_RISK_THRESHOLD: response returned
+      unchanged, no pipeline work occurs.
+    - otherwise, score at or above threshold: extract the risky claim and run
+      the full Blackboard pipeline.
     """
     if not isinstance(prompt, str):
         raise TypeError("prompt must be a string.")
@@ -1430,41 +1448,18 @@ def process_response(prompt: str, response: str, confidence_score: float) -> Dic
         raise ValueError("response cannot be empty.")
 
     confidence_score = clamp_score(confidence_score)
+    above_threshold = confidence_score >= HALLUCINATION_RISK_THRESHOLD
 
-    if confidence_score < HALLUCINATION_RISK_THRESHOLD:
-        return {
-            "status": "SKIPPED_LOW_RISK",
-            "pipeline_triggered": False,
-            "confidence_score": confidence_score,
-            "threshold": HALLUCINATION_RISK_THRESHOLD,
-            "prompt": prompt,
-            "original_response": response,
-            "final_response": response,
-            "extracted_claim": None,
-            "flagged_span": None,
-            "extraction_reason": None,
-            "verification_result": None,
-            "correction_result": None,
-            "orchestrator_result": None,
-            "abstention_detection": None,
-            "evidence_source": None,
-        }
-
-    # The score is high enough to normally trigger the Blackboard. Before
-    # doing that, check whether the response is already an honest
-    # abstention: a probe can flag "I don't know" as high-risk simply
-    # because its activations look unusual, but that's not the same thing
-    # as a hallucination, and running it through claim extraction /
-    # verification / correction could turn an honest hedge into a
-    # confident-sounding invented answer.
+    # An abstention ("Unknown", "I don't know", ...) is a failed answer no
+    # matter what the probe scored it: the probe measures how likely a
+    # *stated* answer is to be wrong, and a refusal to answer is not a stated
+    # answer, so its score is meaningless for routing. Check for it BEFORE the
+    # risk gate and always try to resolve it from evidence.
     #
-    # Rather than just relabeling it and stopping, actually try to resolve
-    # the underlying question against the knowledge base (and, if needed,
-    # a live web search) — if evidence supports a real answer, use it. If
-    # nothing anywhere supports one, the abstention stands: an honest
-    # "I don't know" is the correct output when there's truly no evidence,
-    # not a bug to paper over.
-    abstention_check = abstention_detector.is_abstention(response)
+    # The cheap keyword/exact-match check always runs. The LLM paraphrase
+    # fallback costs a model call, so it only runs on responses the probe
+    # already flagged as risky.
+    abstention_check = abstention_detector.is_abstention(response, allow_llm=above_threshold)
     if abstention_check["is_abstention"]:
         resolution = orchestrator.resolve_abstention(
             prompt=prompt, response=response, confidence_score=confidence_score,
@@ -1485,6 +1480,25 @@ def process_response(prompt: str, response: str, confidence_score: float) -> Dic
             "orchestrator_result": resolution,
             "abstention_detection": abstention_check,
             "evidence_source": resolution["evidence_source"],
+        }
+
+    if not above_threshold:
+        return {
+            "status": "SKIPPED_LOW_RISK",
+            "pipeline_triggered": False,
+            "confidence_score": confidence_score,
+            "threshold": HALLUCINATION_RISK_THRESHOLD,
+            "prompt": prompt,
+            "original_response": response,
+            "final_response": response,
+            "extracted_claim": None,
+            "flagged_span": None,
+            "extraction_reason": None,
+            "verification_result": None,
+            "correction_result": None,
+            "orchestrator_result": None,
+            "abstention_detection": abstention_check,
+            "evidence_source": None,
         }
 
     extraction = claim_extractor.extract(prompt=prompt, response=response, confidence_score=confidence_score)

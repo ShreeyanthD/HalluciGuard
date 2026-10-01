@@ -115,7 +115,7 @@ class HallucinationMitigationPipeline:
             "generated_answer": answer,
             "prob_hallucinated": round(prob_hallucinated, 4),
             "threshold": bb_result["threshold"],
-            "status": bb_result["status"],  # SKIPPED_LOW_RISK | ABSTENTION | BLACKBOARD_PROCESSED
+            "status": bb_result["status"],  # SKIPPED_LOW_RISK | ABSTENTION | ABSTENTION_RESOLVED | BLACKBOARD_PROCESSED
             "blackboard_triggered": bb_result["pipeline_triggered"],
             "abstention_detection": bb_result.get("abstention_detection"),
             "extracted_claim": bb_result.get("extracted_claim"),
@@ -134,15 +134,19 @@ def _print_result(r: Dict[str, Any]) -> None:
     tag = {
         "SKIPPED_LOW_RISK": "low-risk",
         "ABSTENTION": "ABSTENTION",
+        "ABSTENTION_RESOLVED": "RESOLVED",
         "BLACKBOARD_PROCESSED": "HALLUCINATED",
     }.get(r["status"], r["status"])
     print(f"\n[{tag:>12}] p(hallucinated)={r['prob_hallucinated']:.3f} (threshold={r['threshold']})")
     print(f"  Q: {r['question']}")
     print(f"  A (generated): {r['generated_answer']}")
-    if r["status"] == "ABSTENTION":
+    if r["status"] == "ABSTENTION_RESOLVED":
+        print(f"  Model abstained; Blackboard answered from evidence.")
+        print(f"  Final response: {r['final_response']}")
+    elif r["status"] == "ABSTENTION":
         ad = r["abstention_detection"] or {}
-        print(f"  Detected as an honest abstention ({ad.get('method')}): {ad.get('explanation', '')[:120]}")
-        print("  Left unchanged — not treated as a hallucination.")
+        print(f"  Detected as an abstention ({ad.get('method')}): {ad.get('explanation', '')[:120]}")
+        print("  Blackboard found no supporting evidence — abstention stands.")
     elif r["blackboard_triggered"]:
         print(f"  Claim checked: {r['extracted_claim']}")
         v = r["verification_result"] or {}
