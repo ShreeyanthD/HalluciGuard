@@ -10,6 +10,18 @@ identical trace shapes to the frontend.
 from typing import Any, Dict
 
 
+def _cited_sources(evidence, cited_ids):
+    cited = set(cited_ids or [])
+    picked = [e for e in evidence if e["id"] in cited] or [
+        e for e in evidence if (e.get("metadata") or {}).get("url")
+    ]
+    out = []
+    for e in picked:
+        md = e.get("metadata") or {}
+        url = md.get("url") or (e["id"][4:] if str(e["id"]).startswith("web:") else "")
+        out.append({"id": e["id"], "url": url, "title": md.get("title") or url or md.get("source") or e["id"]})
+    return out
+
 def build_trace(result: Dict[str, Any]) -> Dict[str, Any]:
     if result["status"] == "SKIPPED_LOW_RISK":
         return {
@@ -30,11 +42,8 @@ def build_trace(result: Dict[str, Any]) -> Dict[str, Any]:
             "abstained": True,
             "resolved": result["status"] == "ABSTENTION_RESOLVED",
             "original_response": result.get("original_response"),
-            "evidence": [
-                {"id": e["id"], "text": e["text"], "distance": e.get("distance"),
-                 "url": (e.get("metadata") or {}).get("url")}
-                for e in bb.get("retrieved_evidence", [])
-            ],
+            "sources": _cited_sources(bb.get("retrieved_evidence", []),
+                                      answer.get("supporting_evidence_ids", [])),
             "web_search_used": bool(bb.get("web_search_used")),
             "answer_explanation": answer.get("explanation"),
             "supporting_evidence_ids": answer.get("supporting_evidence_ids", []),
