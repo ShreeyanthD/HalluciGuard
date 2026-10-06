@@ -11,9 +11,9 @@ for scope, verified prior work, and actual run status.
 
 ## Reproduction
 
-Use Python 3.11 or 3.12. The default model is pinned Qwen2.5-0.5B-Instruct on CPU.
-Change `model.device` to `cuda` on a GPU machine; larger models require sufficient
-memory. Research commands need no API keys or legacy server dependencies.
+Use Python 3.11 or 3.12. The default model is pinned Qwen2.5-0.5B-Instruct.
+The default data config selects a CUDA GPU when available and otherwise uses
+CPU. Research commands need no API keys or legacy server dependencies.
 
 ```bash
 git clone -b feature/blackboard_fix https://github.com/ShreeyanthD/HalluciGuard.git
@@ -40,6 +40,26 @@ greedy; detector/intervention seeds are `[11, 22, 33]`. A full CPU run can be sl
 For a smaller pilot use `pilot_data.yaml`, `pilot_detect.yaml`, and
 `pilot_mitigate.yaml`. Small samples can produce undefined AUROCs or untrainable
 folds; these are explicitly reported.
+
+### GPU data generation
+
+Enable a GPU runtime in your notebook (for example, Colab's runtime settings)
+and use CUDA-enabled PyTorch. Force GPU use with:
+
+```python
+!python -m data.build --config configs/data.yaml --device cuda
+```
+
+In a terminal, omit `!`. Use `--device cuda:1` to choose another GPU,
+`--device auto` for GPU with CPU fallback, or `--device cpu` to force CPU.
+An explicit CUDA request fails clearly if CUDA is unavailable. The command
+prints the resolved device and precision and records both in its manifest.
+CUDA uses BF16 on supported GPUs and FP16 on older GPUs such as T4; CPU uses
+FP32. Feature summaries are pooled on the model device before transfer to CPU.
+Reduced precision can change generated answers; regenerate features and refit
+detectors for the GPU run when comparing results. Dataset loading, grading,
+and saving still run on CPU. GPU speed depends on hardware and response length;
+no CUDA speedup was benchmarked on the CPU-only validation host.
 
 ## Offline validation
 

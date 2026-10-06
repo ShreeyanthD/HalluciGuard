@@ -1,6 +1,5 @@
 """Frozen Hugging Face causal LM with answer-span forward hooks."""
 from contextlib import contextmanager
-import numpy as np
 
 INSTRUCTIONS = {
     'factual': 'Give only a short answer. If you do not know, answer Unknown.',
@@ -9,15 +8,38 @@ INSTRUCTIONS = {
 }
 
 
+def model_device(torch, requested):
+    """Resolve the execution device and a precision supported by that GPU."""
+    if requested == 'auto':
+        requested = 'cuda' if torch.cuda.is_available() else 'cpu'
+    device = torch.device(requested)
+    if device.type == 'cpu':
+        return str(device), torch.float32
+    if device.type != 'cuda':
+        raise ValueError('Use auto, cpu, cuda, or cuda:N for model.device')
+    if not torch.cuda.is_available():
+        raise RuntimeError('CUDA was requested but is unavailable. Enable a GPU runtime and '
+                           'install CUDA-enabled PyTorch, or use --device cpu.')
+    index = torch.cuda.current_device() if device.index is None else device.index
+    if index >= torch.cuda.device_count():
+        raise ValueError(f'CUDA device {index} does not exist')
+    # Select the requested GPU when checking support; avoid BF16 emulation on
+    # older GPUs (e.g. T4) and use their native FP16 instead.
+    with torch.cuda.device(index):
+        bf16 = torch.cuda.get_device_capability()[0] >= 8 and torch.cuda.is_bf16_supported()
+    return f'cuda:{index}', torch.bfloat16 if bf16 else torch.float16
+
+
 class LocalModel:
     def __init__(self, model_id, revision=None, device='cpu', max_new_tokens=128, threads=4):
         import torch
         from transformers import AutoModelForCausalLM, AutoTokenizer
         self.torch = torch
+        device, dtype = model_device(torch, device)
         torch.set_num_threads(threads)
         self.tokenizer = AutoTokenizer.from_pretrained(model_id, revision=revision)
         self.model = AutoModelForCausalLM.from_pretrained(
-            model_id, revision=revision, torch_dtype=torch.float32 if device == 'cpu' else torch.bfloat16)
+            model_id, revision=revision, torch_dtype=dtype)
         self.model.to(device).eval()
         self.model.requires_grad_(False)
         self.device = device
@@ -30,7 +52,7 @@ class LocalModel:
             raise ValueError('Backend supports models with explicit decoder layers (Qwen/Llama)')
         self.identity = {'model_id': model_id,
                          'revision': getattr(self.model.config, '_commit_hash', revision),
-                         'device': device, 'feature_location': 'decoder_block_output',
+                         'device': device, 'dtype': str(dtype), 'feature_location': 'decoder_block_output',
                          'pooling': 'answer_mean', 'max_new_tokens': max_new_tokens}
 
     def prompt(self, row, revision_answer=None):
@@ -84,8 +106,8 @@ class LocalModel:
         def capture(index):
             def hook(module, args, output):
                 h = output[0] if isinstance(output, tuple) else output
-                mean[index] = h[0, start:].float().mean(0).detach().cpu().numpy()
-                last[index] = h[0, -1].float().detach().cpu().numpy()
+                mean[index] = h[0, start:].float().mean(0).detach()
+                last[index] = h[0, -1].float().detach()
             return hook
         try:
             for i, layer in enumerate(self.layers):
@@ -95,7 +117,10 @@ class LocalModel:
         finally:
             for handle in handles:
                 handle.remove()
-        return np.stack([mean[i] for i in range(len(self.layers))]), np.stack([last[i] for i in range(len(self.layers))])
+        # Pool on the GPU and transfer once per summary, rather than twice for
+        # every decoder layer. Export the same float32 [layer, hidden] arrays.
+        return (self.torch.stack([mean[i] for i in range(len(self.layers))]).cpu().numpy(),
+                self.torch.stack([last[i] for i in range(len(self.layers))]).cpu().numpy())
 
     def fluency(self, row, answer):
         # Base-model teacher-forced NLL; proxy for fluency, not a human rating.

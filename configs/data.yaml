@@ -4,7 +4,7 @@ paraphrase_jaccard: 0.85
 model:
   model_id: Qwen/Qwen2.5-0.5B-Instruct
   revision: 7ae557604adf67be50417f59c2c2f167def9a775
-  device: cpu
+  device: auto
   max_new_tokens: 128
 sources:
 - dataset: truthfulqa/truthful_qa

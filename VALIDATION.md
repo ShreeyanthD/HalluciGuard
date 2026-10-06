@@ -93,6 +93,18 @@ execution-environment limitation when interpreting full code results. Details
 are in `artifacts/adapter_validation.json`. No 600-question generation study was
 run here.
 
+## GPU command update
+
+The data builder accepts `--device auto`, `cpu`, `cuda`, and indexed CUDA
+devices. The full data config now uses `auto`. Device selection and BF16/FP16
+fallback are tested with simulated CUDA capabilities; tiny real-transformer
+tests verify answer-span values, float32 output, hook cleanup, and only two
+stacked feature transfers. All 29 tests passed after this update.
+A one-question offline build using the pinned Qwen model completed on CPU
+with `--device auto`, recorded `cpu`/`torch.float32` in its manifest, and saved
+valid features. The validation host has no CUDA GPU, so GPU execution, memory
+usage, and speedup have not been benchmarked.
+
 ## Work still needed for a research claim
 
 A larger model and adequate generation budget, enough independent examples of

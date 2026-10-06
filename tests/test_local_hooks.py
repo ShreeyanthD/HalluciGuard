@@ -60,3 +60,16 @@ def test_steering_changes_activations_and_always_removes_hook():
         with backend.steering(np.ones(16)):
             raise RuntimeError('deliberate failure')
     assert not layer._forward_hooks
+
+
+def test_features_transfer_only_stacked_summaries(monkeypatch):
+    backend = tiny_backend()
+    transfers = []
+    original = backend.torch.Tensor.cpu
+    def cpu(tensor, *args, **kwargs):
+        transfers.append(tuple(tensor.shape))
+        return original(tensor, *args, **kwargs)
+    monkeypatch.setattr(backend.torch.Tensor, 'cpu', cpu)
+    mean, last = backend.features({}, 'ABC')
+    assert transfers == [(3, 16), (3, 16)]
+    assert mean.dtype == last.dtype == np.float32

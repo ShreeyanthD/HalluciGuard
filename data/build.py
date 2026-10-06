@@ -63,6 +63,7 @@ def build(config):
     assign_groups(rows, config.get('paraphrase_jaccard', 0.85))
     assign_splits(rows, config['seed'])
     backend = LocalModel(**config['model'])
+    print(f"Model device: {backend.device}; dtype: {backend.identity['dtype']}", flush=True)
     out = Path(config['output'])
     out.mkdir(parents=True, exist_ok=True)
     paths = [s['path'] for s in config['sources'] if 'path' in s]
@@ -91,8 +92,12 @@ def build(config):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--config', required=True)
+    parser.add_argument('--device', help='Override model.device: auto, cpu, cuda, or cuda:N')
     args = parser.parse_args()
-    build(read_config(args.config))
+    config = read_config(args.config)
+    if args.device is not None:
+        config['model']['device'] = args.device
+    build(config)
 
 
 if __name__ == '__main__':
