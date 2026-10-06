@@ -1,0 +1,11 @@
+experiment: detection
+data: artifacts/smoke_data
+output: artifacts/smoke_detection
+allow_fixture: true
+seeds: [11, 22, 33]
+families: [factual, math, code]
+detectors: [linear, single_dataset, pooled, cross_layer_erm, group_dro, clap_style, trajectory, text_only]
+steps: 100
+attention_steps: 30
+bootstrap: 100
+max_fpr: 0.1

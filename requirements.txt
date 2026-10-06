@@ -14,3 +14,5 @@ joblib
 numpy
 datasets
 accelerate
+PyYAML>=6,<7
+pytest>=8,<10

@@ -14,6 +14,7 @@ eval_data/sample_qa.jsonl. It does NOT measure real model quality.
 """
 
 import json
+import hashlib
 import os
 import re
 import sys
@@ -42,7 +43,8 @@ class HashEF:
         for text in input:
             v = np.zeros(256, dtype=np.float32)
             for tok in re.findall(r"\w+", text.lower()):
-                v[hash(tok) % 256] += 1.0
+                slot = int.from_bytes(hashlib.sha256(tok.encode()).digest()[:8], 'big') % 256
+                v[slot] += 1.0
             n = np.linalg.norm(v) or 1.0
             out.append(v / n)
         return out

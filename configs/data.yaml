@@ -1,0 +1,30 @@
+seed: 42
+output: artifacts/data
+paraphrase_jaccard: 0.85
+model:
+  model_id: Qwen/Qwen2.5-0.5B-Instruct
+  revision: 7ae557604adf67be50417f59c2c2f167def9a775
+  device: cpu
+  max_new_tokens: 128
+sources:
+- dataset: truthfulqa/truthful_qa
+  subset: generation
+  split: validation
+  family: factual
+  adapter: truthfulqa
+  limit: 200
+  revision: 741b8276f2d1982aa3d5b832d3ee81ed3b896490
+- dataset: openai/gsm8k
+  subset: main
+  split: train
+  family: math
+  adapter: gsm8k
+  limit: 200
+  revision: 740312add88f781978c0658806c59bc2815b9866
+- dataset: google-research-datasets/mbpp
+  subset: sanitized
+  split: test
+  family: code
+  adapter: mbpp
+  limit: 200
+  revision: 4bb6404fdc6cacfda99d4ac4205087b89d32030c

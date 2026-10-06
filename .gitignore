@@ -30,3 +30,10 @@ Thumbs.db
 
 # --- misc ---
 scratch/
+
+# --- Research artifacts ---
+artifacts/
+.pytest_cache/
+*.joblib
+*.pt
+eval_chroma/

@@ -1,0 +1,11 @@
+experiment: detection
+data: artifacts/pilot_data
+output: artifacts/pilot_detection
+seeds: [11, 22, 33]
+families: [factual, math, code]
+detectors: [linear, single_dataset, pooled, cross_layer_erm, group_dro, clap_style, trajectory, text_only]
+layer: -1
+steps: 300
+attention_steps: 100
+max_fpr: 0.1
+bootstrap: 1000

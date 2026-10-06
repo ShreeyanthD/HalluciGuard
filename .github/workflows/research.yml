@@ -1,0 +1,18 @@
+name: Research pipeline checks
+on: [push, pull_request]
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    env:
+      OPENBLAS_NUM_THREADS: 4
+      OMP_NUM_THREADS: 4
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+      - run: pip install -r requirements-research.txt
+      - run: python -m pytest -q tests
+      - run: python -m eval.smoke
+      - run: python -m eval.run --config configs/smoke.yaml

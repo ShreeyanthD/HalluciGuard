@@ -1,0 +1,23 @@
+experiment: mitigation
+data: artifacts/pilot_data
+output: artifacts/pilot_mitigation
+seeds: [11, 22, 33]
+families: [factual, math, code]
+detectors: [group_dro]
+layer: -1
+steps: 300
+max_fpr: 0.1
+bootstrap: 1000
+model:
+  model_id: Qwen/Qwen2.5-0.5B-Instruct
+  revision: 7ae557604adf67be50417f59c2c2f167def9a775
+  device: cpu
+  max_new_tokens: 96
+budget: 10
+test_limit: 2
+samples: 3
+direction_limit: 8
+steering_layer: -1
+steering_strength: 1.0
+use_task_hints: false
+ablations: [blackboard, no_blackboard, always_on_steering, no_gating, detector_only, base_model_alone, strongest_model_alone]
