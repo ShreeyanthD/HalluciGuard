@@ -64,7 +64,8 @@ import numpy as np
 _ROOT = Path(__file__).resolve().parent
 
 CORRECT, ABSTAINED, HALLUCINATED = "CORRECT", "ABSTAINED", "HALLUCINATED"
-LABELS = (CORRECT, ABSTAINED, HALLUCINATED)
+PROCESSING_ERROR = "PROCESSING_ERROR"
+LABELS = (CORRECT, ABSTAINED, HALLUCINATED, PROCESSING_ERROR)
 
 
 # ---------------------------------------------------------------------------
@@ -379,12 +380,15 @@ def arm_metrics(labels: List[str]) -> Dict[str, Any]:
     n = len(labels)
     c = Counter(labels)
     answered = c[CORRECT] + c[HALLUCINATED]
+    failed = c[HALLUCINATED] + c[PROCESSING_ERROR]
     return {
         "n": n,
         "correct": c[CORRECT],
         "abstained": c[ABSTAINED],
         "hallucinated": c[HALLUCINATED],
+        "processing_errors": c[PROCESSING_ERROR],
         "hallucination_rate": c[HALLUCINATED] / n if n else 0.0,
+        "failure_rate": failed / n if n else 0.0,
         "accuracy": c[CORRECT] / n if n else 0.0,
         "abstention_rate": c[ABSTAINED] / n if n else 0.0,
         "hallucination_rate_among_answered": c[HALLUCINATED] / answered if answered else 0.0,
@@ -392,14 +396,32 @@ def arm_metrics(labels: List[str]) -> Dict[str, Any]:
 
 
 def paired_bootstrap(base: List[str], bb: List[str], iters: int = 2000, seed: int = 0) -> Dict[str, float]:
+    if len(base) != len(bb):
+        raise ValueError("Paired bootstrap requires equal-length outcome lists.")
+    if not base:
+        return {
+            "abs_reduction_ci95_low": 0.0,
+            "abs_reduction_ci95_high": 0.0,
+            "abs_failure_reduction_ci95_low": 0.0,
+            "abs_failure_reduction_ci95_high": 0.0,
+        }
     rng = np.random.default_rng(seed)
     b = np.array([x == HALLUCINATED for x in base], dtype=float)
     w = np.array([x == HALLUCINATED for x in bb], dtype=float)
+    b_fail = np.array([x in (HALLUCINATED, PROCESSING_ERROR) for x in base], dtype=float)
+    w_fail = np.array([x in (HALLUCINATED, PROCESSING_ERROR) for x in bb], dtype=float)
     n = len(b)
     idx = rng.integers(0, n, size=(iters, n))
     diffs = b[idx].mean(axis=1) - w[idx].mean(axis=1)  # positive = blackboard helps
     lo, hi = np.percentile(diffs, [2.5, 97.5])
-    return {"abs_reduction_ci95_low": float(lo), "abs_reduction_ci95_high": float(hi)}
+    failure_diffs = b_fail[idx].mean(axis=1) - w_fail[idx].mean(axis=1)
+    failure_lo, failure_hi = np.percentile(failure_diffs, [2.5, 97.5])
+    return {
+        "abs_reduction_ci95_low": float(lo),
+        "abs_reduction_ci95_high": float(hi),
+        "abs_failure_reduction_ci95_low": float(failure_lo),
+        "abs_failure_reduction_ci95_high": float(failure_hi),
+    }
 
 
 def build_report(records, rows, base_labels, bb_labels, args) -> Dict[str, Any]:
@@ -446,14 +468,19 @@ def format_summary(rep: Dict[str, Any]) -> str:
         "| metric | without blackboard | with blackboard |",
         "|---|---|---|",
         f"| hallucination rate (wrong / all) | {pct(b['hallucination_rate'])} | {pct(w['hallucination_rate'])} |",
+        f"| failure rate (wrong or processing error / all) | {pct(b['failure_rate'])} | {pct(w['failure_rate'])} |",
         f"| accuracy (correct / all) | {pct(b['accuracy'])} | {pct(w['accuracy'])} |",
         f"| abstention rate | {pct(b['abstention_rate'])} | {pct(w['abstention_rate'])} |",
         f"| hallucination rate among answered | {pct(b['hallucination_rate_among_answered'])} | {pct(w['hallucination_rate_among_answered'])} |",
-        f"| counts (correct / abstained / wrong) | {b['correct']} / {b['abstained']} / {b['hallucinated']} | {w['correct']} / {w['abstained']} / {w['hallucinated']} |",
+        f"| counts (correct / abstained / wrong / errors) | {b['correct']} / {b['abstained']} / {b['hallucinated']} / {b['processing_errors']} | {w['correct']} / {w['abstained']} / {w['hallucinated']} / {w['processing_errors']} |",
         "",
-        f"**Hallucination reduction: {100 * rep['absolute_hallucination_reduction']:.1f} points "
+        f"**Hallucination-rate reduction: {100 * rep['absolute_hallucination_reduction']:.1f} points "
         f"({100 * rep['relative_hallucination_reduction']:.1f}% relative)**, "
-        f"95% CI on the point drop: [{100 * rep['abs_reduction_ci95_low']:.1f}, {100 * rep['abs_reduction_ci95_high']:.1f}]",
+        f"95% paired-bootstrap CI: [{100 * rep['abs_reduction_ci95_low']:.1f}, {100 * rep['abs_reduction_ci95_high']:.1f}] points.",
+        f"Failure-rate reduction (errors counted as failures): "
+        f"{100 * (b['failure_rate'] - w['failure_rate']):.1f} points, "
+        f"95% paired-bootstrap CI: [{100 * rep['abs_failure_reduction_ci95_low']:.1f}, "
+        f"{100 * rep['abs_failure_reduction_ci95_high']:.1f}] points.",
         "",
         f"Blackboard ran on {rep['blackboard_triggered']} of {b['n']} answers. "
         f"Made worse (correct -> wrong): {rep['harmed']}. "
@@ -551,7 +578,11 @@ def main():
     # ---- grade both arms -------------------------------------------------
     judge = make_llm_judge(bc.groq_caller) if args.llm_judge else None
     base_labels = [grade(r["answer"], r["gold"], args.match, judge) for r in records]
-    bb_labels = [grade(x["final_response"], r["gold"], args.match, judge) for r, x in zip(records, rows)]
+    bb_labels = [
+        PROCESSING_ERROR if x["status"] == "ERROR"
+        else grade(x["final_response"], r["gold"], args.match, judge)
+        for r, x in zip(records, rows)
+    ]
 
     report = build_report(records, rows, base_labels, bb_labels, args)
     summary = format_summary(report)

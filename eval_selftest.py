@@ -128,6 +128,20 @@ def test_grading():
     print("ok  grading + abstention detection")
 
 
+def test_processing_error_accounting():
+    treated = [ev.CORRECT, ev.PROCESSING_ERROR]
+    metrics = ev.arm_metrics(treated)
+    intervals = ev.paired_bootstrap(
+        [ev.CORRECT, ev.HALLUCINATED], treated, iters=100, seed=3
+    )
+    assert metrics["processing_errors"] == 1
+    assert metrics["hallucination_rate"] == 0.0
+    assert metrics["failure_rate"] == 0.5
+    assert "abs_failure_reduction_ci95_low" in intervals
+    assert "abs_failure_reduction_ci95_high" in intervals
+    print("ok  processing errors counted separately from hallucinations")
+
+
 # ---- 2. end-to-end stage 2 -------------------------------------------------
 def test_stage2():
     recs = ev.load_dataset(str(ROOT / "eval_data" / "sample_qa.jsonl"), "halueval")
@@ -173,5 +187,6 @@ def test_stage2():
 
 if __name__ == "__main__":
     test_grading()
+    test_processing_error_accounting()
     test_stage2()
     print("\nAll self-tests passed.")

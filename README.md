@@ -202,12 +202,14 @@ the response and you just want this pipeline to risk-score and ground it.
 
 ## Evaluating the Blackboard (with vs. without)
 
-`eval_pipeline.py` runs the same questions through two arms — the base
-model's raw answer (**without** blackboard) and the answer after
-`process_response()` (**with** blackboard) — and grades each as
-`CORRECT`, `ABSTAINED` or `HALLUCINATED`. Headline metric:
-`hallucination_rate = wrong answers / all questions`, plus a paired-bootstrap
-95% CI on the drop.
+`eval_pipeline.py` compares paired outcomes for each question: the base
+model's raw answer (**without** blackboard) and the same answer after
+`process_response()` (**with** blackboard). Each outcome is labeled
+`CORRECT`, `ABSTAINED`, or `HALLUCINATED`; a failed Blackboard call is labeled
+`PROCESSING_ERROR` rather than being graded from its unchanged fallback text.
+The report keeps hallucination rate (`hallucinated / all questions`) separate
+from operational failure rate (`(hallucinated + processing errors) / all
+questions`). Both reductions include paired-bootstrap 95% confidence intervals.
 
 ```bash
 # full run (GPU box, GROQ_API_KEY set)
@@ -225,11 +227,16 @@ python eval_selftest.py   # offline plumbing test (no GPU / API key)
 ```
 
 Outputs go to `out_dir`: `metrics.json`, `per_item.csv` (every question, raw
-vs. final answer, labels, status), `summary.md`. The eval uses its own
+vs. final answer, labels, status), `summary.md`. Processing errors are retained
+in the denominator and count as failures in the operational failure rate, but
+not as hallucinations. The eval uses its own
 ChromaDB (`--chroma_dir`, default `./eval_chroma`) so your real store is never
 touched. The knowledge base is built from the dataset's `knowledge` field
 (pooled across all questions); `--no_knowledge` runs the empty-KB ablation and
-`--isolate_memory` stops verdicts leaking between questions.
+`--isolate_memory` stops verdicts leaking between questions. Report the exact
+dataset version/split, selected row IDs, model and probe checkpoints, threshold,
+grader mode, and whether memory/web search were enabled alongside any paper
+results; these settings change the experiment.
 
 **Abstention:** the base model's system prompt now allows the single word
 `Unknown` instead of forcing an answer, and `AbstentionDetector` treats a bare
