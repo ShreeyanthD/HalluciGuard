@@ -361,7 +361,7 @@ def run_blackboard_stage(records, args):
 
     def _components():
         if not hasattr(local, "orch"):
-            o = bc.orchestrator
+            o = _components_base
             local.orch = bc.Orchestrator(
                 blackboard=bc.Blackboard(), memory_agent=memory_agent,
                 retrieval_agent=o.retrieval_agent, verifier_agent=o.verifier_agent,
@@ -370,6 +370,17 @@ def run_blackboard_stage(records, args):
                 web_search_agent=o.web_search_agent, answer_agent=o.answer_agent,
             )
         return local.orch
+
+    # Works with ANY blackboard_core: process_response() looks up the module-level
+    # `orchestrator` at call time, so swap in a proxy that forwards every attribute
+    # to this thread's own Orchestrator. No signature changes needed.
+    class _OrchProxy:
+        def __getattr__(self, name):
+            return getattr(_components(), name)
+
+    _components_base = bc.orchestrator
+    bc.orchestrator = _OrchProxy()
+    print(f"[stage 2] using {bc.__file__}")
 
     def _one(r):
         raw = r["answer"]
@@ -383,12 +394,7 @@ def run_blackboard_stage(records, args):
             row["status"] = "EMPTY_ANSWER"
         else:
             try:
-                out = bc.process_response(
-                    prompt=r["question"], response=raw, confidence_score=score,
-                    _orchestrator=_components(),
-                    _claim_extractor=bc.claim_extractor,
-                    _abstention_detector=bc.abstention_detector,
-                )
+                out = bc.process_response(prompt=r["question"], response=raw, confidence_score=score)
                 row["status"] = out["status"]
                 row["final_response"] = out["final_response"]
                 row["evidence_source"] = out.get("evidence_source")
