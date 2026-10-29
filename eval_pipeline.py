@@ -53,8 +53,10 @@ import os
 import random
 import re
 import sys
+import threading
 import time
 from collections import Counter
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -340,9 +342,36 @@ def run_blackboard_stage(records, args):
     else:
         print("[stage 2] knowledge base: EMPTY (--no_knowledge)")
 
-    results = []
-    t_all = time.time()
-    for i, r in enumerate(records):
+    # ---- parallel stage 2 ------------------------------------------------
+    # Each worker thread gets its own Blackboard + Orchestrator (the module-level
+    # one holds a single shared workspace). Agents themselves are stateless and
+    # take the blackboard as an argument, so they are shared.
+    class _NoMemory:
+        """Used with --isolate_memory: every question must see an empty episodic memory,
+        which is not expressible with a shared store under concurrency."""
+        def check_memory(self, blackboard):
+            res = {"match_found": False, "matches": [], "best_match": None}
+            blackboard.write("memory_result", res, author="NoMemory")
+            return res
+        def log_verified_claim(self, blackboard):
+            return None
+
+    memory_agent = _NoMemory() if args.isolate_memory else bc.memory_agent
+    local = threading.local()
+
+    def _components():
+        if not hasattr(local, "orch"):
+            o = bc.orchestrator
+            local.orch = bc.Orchestrator(
+                blackboard=bc.Blackboard(), memory_agent=memory_agent,
+                retrieval_agent=o.retrieval_agent, verifier_agent=o.verifier_agent,
+                correction_agent=o.correction_agent,
+                max_verification_rounds=o.max_verification_rounds,
+                web_search_agent=o.web_search_agent, answer_agent=o.answer_agent,
+            )
+        return local.orch
+
+    def _one(r):
         raw = r["answer"]
         score = r.get("prob_hallucinated")
         if score is None:
@@ -354,9 +383,12 @@ def run_blackboard_stage(records, args):
             row["status"] = "EMPTY_ANSWER"
         else:
             try:
-                if args.isolate_memory:
-                    bc.reset_memory_collection()
-                out = bc.process_response(prompt=r["question"], response=raw, confidence_score=score)
+                out = bc.process_response(
+                    prompt=r["question"], response=raw, confidence_score=score,
+                    _orchestrator=_components(),
+                    _claim_extractor=bc.claim_extractor,
+                    _abstention_detector=bc.abstention_detector,
+                )
                 row["status"] = out["status"]
                 row["final_response"] = out["final_response"]
                 row["evidence_source"] = out.get("evidence_source")
@@ -366,9 +398,21 @@ def run_blackboard_stage(records, args):
                 row["status"] = "ERROR"
                 row["error"] = f"{type(exc).__name__}: {exc}"[:300]
         row["seconds"] = round(time.time() - t0, 2)
-        results.append(row)
-        if (i + 1) % 10 == 0 or i + 1 == len(records):
-            print(f"[stage 2] {i + 1}/{len(records)}  ({time.time() - t_all:.0f}s)")
+        return row
+
+    workers = max(1, args.workers)
+    print(f"[stage 2] {len(records)} questions, {workers} workers")
+    results = [None] * len(records)
+    done = 0
+    t_all = time.time()
+    with ThreadPoolExecutor(max_workers=workers) as ex:
+        futs = {ex.submit(_one, r): i for i, r in enumerate(records)}
+        from concurrent.futures import as_completed
+        for f in as_completed(futs):
+            results[futs[f]] = f.result()
+            done += 1
+            if done % 10 == 0 or done == len(records):
+                print(f"[stage 2] {done}/{len(records)}  ({time.time() - t_all:.0f}s)")
     return results, bc
 
 
@@ -532,7 +576,9 @@ def main():
     bbg.add_argument("--no_knowledge", action="store_true", help="ablation: empty knowledge base")
     bbg.add_argument("--enable_web", action="store_true", help="allow Tavily web-search fallback")
     bbg.add_argument("--isolate_memory", action="store_true",
-                     help="clear episodic memory before every question (no cross-question leakage)")
+                     help="every question sees an empty episodic memory (no cross-question leakage)")
+    bbg.add_argument("--workers", type=int, default=8,
+                     help="parallel questions in stage 2 (lower it if Groq returns 429s)")
 
     gr = ap.add_argument_group("grading / output")
     gr.add_argument("--match", default="lenient", choices=["lenient", "strict"])
@@ -577,12 +623,16 @@ def main():
 
     # ---- grade both arms -------------------------------------------------
     judge = make_llm_judge(bc.groq_caller) if args.llm_judge else None
-    base_labels = [grade(r["answer"], r["gold"], args.match, judge) for r in records]
-    bb_labels = [
-        PROCESSING_ERROR if x["status"] == "ERROR"
-        else grade(x["final_response"], r["gold"], args.match, judge)
-        for r, x in zip(records, rows)
-    ]
+    def _pmap(fn, items):
+        with ThreadPoolExecutor(max_workers=max(1, args.workers) if judge else 1) as ex:
+            return list(ex.map(fn, items))
+
+    base_labels = _pmap(lambda r: grade(r["answer"], r["gold"], args.match, judge), records)
+    bb_labels = _pmap(
+        lambda rx: PROCESSING_ERROR if rx[1]["status"] == "ERROR"
+        else grade(rx[1]["final_response"], rx[0]["gold"], args.match, judge),
+        list(zip(records, rows)),
+    )
 
     report = build_report(records, rows, base_labels, bb_labels, args)
     summary = format_summary(report)
