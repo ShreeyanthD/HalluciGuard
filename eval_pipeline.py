@@ -48,10 +48,14 @@ Dataset formats (--format auto detects by file contents)
 
 import argparse
 import csv
+import hashlib
 import json
+import math
 import os
+import platform
 import random
 import re
+import subprocess
 import sys
 import threading
 import time
@@ -118,9 +122,17 @@ def parse_indices(spec: Optional[str]) -> Optional[List[int]]:
     return list(dict.fromkeys(out)) or None
 
 
+LOAD_STATS: Dict[str, int] = {}
+
+
+def norm_q(q: str) -> str:
+    return re.sub(r"\s+", " ", re.sub(r"[^\w\s]", " ", str(q).lower())).strip()
+
+
 def load_dataset(path: str, fmt: str = "auto", q_field=None, a_field=None, k_field=None,
                  limit: Optional[int] = None, seed: int = 0, shuffle: bool = False,
-                 start: int = 0, indices: Optional[List[int]] = None) -> List[Dict[str, Any]]:
+                 start: int = 0, indices: Optional[List[int]] = None,
+                 exclude_ids: Optional[set] = None, exclude_questions: Optional[set] = None) -> List[Dict[str, Any]]:
     """Selection (all indexes are 0-based row numbers in the ORIGINAL file):
          indices=[3, 17, 42]  -> exactly those rows, in that order
          start=100, limit=50  -> rows 100..149
@@ -150,6 +162,16 @@ def load_dataset(path: str, fmt: str = "auto", q_field=None, a_field=None, k_fie
             random.Random(seed).shuffle(order)
 
     out = []
+    seen_q: set = set()
+    LOAD_STATS.update(excluded_probe_train=0, duplicates_dropped=0)
+    exclude_ids = exclude_ids or set()
+    exclude_questions = set(exclude_questions or set())
+    # a row that duplicates a probe-training question is also training data
+    for i, row in enumerate(rows):
+        if orig[i] in exclude_ids and isinstance(row, dict):
+            q0 = _first(row, [q_field, "question", "prompt", "query"])
+            if q0 is not None:
+                exclude_questions.add(norm_q(q0))
     for i in order:
         row = rows[i]
         q = _first(row, [q_field, "question", "prompt", "query"])
@@ -161,6 +183,13 @@ def load_dataset(path: str, fmt: str = "auto", q_field=None, a_field=None, k_fie
             know = row.get("knowledge")
         if q is None or gold is None:
             continue
+        if orig[i] in exclude_ids or norm_q(q) in exclude_questions:
+            LOAD_STATS["excluded_probe_train"] += 1   # probe saw this question in training
+            continue
+        if norm_q(q) in seen_q:
+            LOAD_STATS["duplicates_dropped"] += 1
+            continue
+        seen_q.add(norm_q(q))
         golds = gold if isinstance(gold, list) else [gold]
         rec = {
             "id": orig[i],
@@ -272,6 +301,205 @@ def make_llm_judge(llm_caller):
 
 
 # ---------------------------------------------------------------------------
+# Statistics helpers
+# ---------------------------------------------------------------------------
+
+def wilson_ci(k: int, n: int, z: float = 1.96) -> List[float]:
+    if n == 0:
+        return [0.0, 0.0]
+    p = k / n
+    d = 1 + z * z / n
+    c = (p + z * z / (2 * n)) / d
+    h = z * math.sqrt(p * (1 - p) / n + z * z / (4 * n * n)) / d
+    return [max(0.0, c - h), min(1.0, c + h)]
+
+
+def mcnemar_exact(b: int, c: int) -> float:
+    """Two-sided exact p-value on discordant pairs (b = baseline-only wrong,
+    c = other-arm-only wrong)."""
+    n = b + c
+    if n == 0:
+        return 1.0
+    k = min(b, c)
+    tail = sum(math.comb(n, i) for i in range(0, k + 1)) / 2 ** n
+    return min(1.0, 2 * tail)
+
+
+def auroc(scores: List[float], y: List[int]) -> Optional[float]:
+    """Mann-Whitney AUROC; None if only one class is present."""
+    pos = [s for s, t in zip(scores, y) if t == 1]
+    neg = [s for s, t in zip(scores, y) if t == 0]
+    if not pos or not neg:
+        return None
+    sc = np.array(scores, dtype=float)
+    order = sc.argsort()
+    ranks = np.empty(len(sc))
+    i = 0
+    while i < len(sc):               # average ranks over ties
+        j = i
+        while j + 1 < len(sc) and sc[order[j + 1]] == sc[order[i]]:
+            j += 1
+        ranks[order[i:j + 1]] = (i + j) / 2 + 1
+        i = j + 1
+    yy = np.array(y)
+    r_pos = ranks[yy == 1].sum()
+    return float((r_pos - len(pos) * (len(pos) + 1) / 2) / (len(pos) * len(neg)))
+
+
+def probe_threshold_report(records, base_labels, threshold: float) -> Optional[Dict[str, Any]]:
+    """Precision/recall of 'flag if score >= threshold' for catching wrong raw answers.
+    Positive class = HALLUCINATED; abstained raw answers are excluded."""
+    pairs = [(r["prob_hallucinated"], l == HALLUCINATED) for r, l in zip(records, base_labels)
+             if r.get("prob_hallucinated") is not None and l != ABSTAINED]
+    if not pairs:
+        return None
+    tp = sum(1 for sc, y in pairs if sc >= threshold and y)
+    fp = sum(1 for sc, y in pairs if sc >= threshold and not y)
+    fn = sum(1 for sc, y in pairs if sc < threshold and y)
+    tn = sum(1 for sc, y in pairs if sc < threshold and not y)
+    prec = tp / (tp + fp) if tp + fp else None
+    rec = tp / (tp + fn) if tp + fn else None
+    f1 = 2 * prec * rec / (prec + rec) if prec and rec else None
+    return {"threshold": threshold, "tp": tp, "fp": fp, "fn": fn, "tn": tn,
+            "precision": prec, "recall": rec, "f1": f1,
+            "precision_ci95": wilson_ci(tp, tp + fp) if tp + fp else None,
+            "recall_ci95": wilson_ci(tp, tp + fn) if tp + fn else None,
+            "base_wrong_rate": (tp + fn) / len(pairs), "flagged_rate": (tp + fp) / len(pairs)}
+
+
+def probe_auroc_report(records, base_labels, iters: int = 2000, seed: int = 0) -> Optional[Dict[str, Any]]:
+    """Does the probe score separate wrong from correct raw answers? Abstentions
+    are excluded (the probe score is not meaningful for them)."""
+    pairs = [(r["prob_hallucinated"], 1 if l == HALLUCINATED else 0)
+             for r, l in zip(records, base_labels)
+             if r.get("prob_hallucinated") is not None and l != ABSTAINED]
+    if len(pairs) < 10:
+        return None
+    sc, y = [p[0] for p in pairs], [p[1] for p in pairs]
+    point = auroc(sc, y)
+    if point is None:
+        return None
+    rng = np.random.default_rng(seed)
+    boots = []
+    for _ in range(iters):
+        idx = rng.integers(0, len(sc), len(sc))
+        a = auroc([sc[i] for i in idx], [y[i] for i in idx])
+        if a is not None:
+            boots.append(a)
+    lo, hi = np.percentile(boots, [2.5, 97.5]) if boots else (None, None)
+    return {"n": len(sc), "n_wrong": int(sum(y)), "auroc": point,
+            "ci95_low": None if lo is None else float(lo),
+            "ci95_high": None if hi is None else float(hi)}
+
+
+# ---------------------------------------------------------------------------
+# Probe-contamination guard
+# ---------------------------------------------------------------------------
+
+def probe_exclusions(args) -> Dict[str, Any]:
+    """Questions/rows the probe was TRAINED on must not be evaluated.
+    Sources, in order: the probe bundle's own `train_questions` (probes trained
+    with the updated train_probe.py), then --probe_train_indices for legacy
+    probes (e.g. rows 0-99 for the original Dataset_builder run)."""
+    ids: set = set(parse_indices(args.probe_train_indices) or [])
+    questions: set = set()
+    source = "probe_train_indices" if ids else None
+    if args.probe:
+        import joblib
+        bundle = joblib.load(args.probe)
+        tq = bundle.get("train_questions")
+        if tq:
+            questions = {norm_q(q) for q in tq}
+            source = "probe bundle train_questions"
+    return {"ids": ids, "questions": questions, "source": source}
+
+
+def enforce_probe_guard(args, ex: Dict[str, Any], uses_probe_scores: bool) -> None:
+    if not uses_probe_scores or ex["source"] or args.allow_train_overlap:
+        return
+    raise SystemExit(
+        "REFUSING TO RUN: this evaluation uses probe scores but nothing says which questions the "
+        "probe was trained on, so train/test overlap cannot be ruled out.\n"
+        "  - retrain with the updated probe/train_probe.py (records train_questions in the bundle), or\n"
+        "  - pass --probe_train_indices (e.g. 0-99 for the original Dataset_builder run), or\n"
+        "  - pass --allow_train_overlap to run anyway (results are then NOT paper-clean).")
+
+
+# ---------------------------------------------------------------------------
+# Control arm: the strong LLM answering closed-book, with no blackboard
+# ---------------------------------------------------------------------------
+
+CONTROL_PROMPT = (
+    "Answer the question in a single word or short phrase only. Do not use full sentences, "
+    "explanations, or punctuation. If you do not know the answer or are not sure, answer with "
+    "the single word: Unknown\n\nQuestion: {q}")
+
+
+def run_llm_only_control(records, llm_caller) -> List[str]:
+    """Same model family that powers the blackboard agents, asked the question
+    directly. If the blackboard doesn't beat this, its gain is just 'a bigger
+    model answered' rather than the architecture."""
+    out = []
+    for i, r in enumerate(records):
+        try:
+            out.append(llm_caller(CONTROL_PROMPT.format(q=r["question"]), temperature=0.0).strip())
+        except Exception as exc:
+            out.append(f"[CONTROL_ERROR {type(exc).__name__}]")
+        if (i + 1) % 10 == 0 or i + 1 == len(records):
+            print(f"[control] {i + 1}/{len(records)}")
+    return out
+
+
+# ---------------------------------------------------------------------------
+# Run manifest
+# ---------------------------------------------------------------------------
+
+def _sha256(path: Optional[str]) -> Optional[str]:
+    if not path or not Path(path).exists():
+        return None
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def _git(*cmd) -> Optional[str]:
+    try:
+        return subprocess.check_output(["git", *cmd], cwd=_ROOT, stderr=subprocess.DEVNULL, text=True).strip()
+    except Exception:
+        return None
+
+
+def write_manifest(out_dir: Path, args, records, bc, guard) -> None:
+    versions = {"python": platform.python_version(), "numpy": np.__version__}
+    for mod in ("torch", "transformers", "sklearn", "chromadb"):
+        try:
+            versions[mod] = __import__(mod).__version__
+        except Exception:
+            pass
+    manifest = {
+        "timestamp": datetime.now().isoformat(timespec="seconds"),
+        "argv": sys.argv,
+        "args": {k: v for k, v in vars(args).items()},
+        "git_commit": _git("rev-parse", "HEAD"),
+        "git_dirty": bool(_git("status", "--porcelain")),
+        "blackboard_core_file": getattr(bc, "__file__", None),
+        "groq_model": getattr(bc, "GROQ_MODEL", None),
+        "generator_model": args.model_id, "probe_layer": args.layer,
+        "sha256": {"dataset": _sha256(args.dataset), "answers_file": _sha256(args.answers_file),
+                   "probe": _sha256(args.probe)},
+        "probe_contamination_check": guard["source"] or ("NOT CHECKED (allow_train_overlap)" if args.allow_train_overlap else "n/a (no probe scores)"),
+        "excluded_as_probe_train": LOAD_STATS.get("excluded_probe_train", 0),
+        "duplicate_questions_dropped": LOAD_STATS.get("duplicates_dropped", 0),
+        "row_ids_evaluated": [r["id"] for r in records],
+        "versions": versions,
+    }
+    with open(out_dir / "run_manifest.json", "w") as f:
+        json.dump(manifest, f, indent=2, default=str)
+
+
+# ---------------------------------------------------------------------------
 # Stage 1: generate + probe score (GPU)
 # ---------------------------------------------------------------------------
 
@@ -319,6 +547,8 @@ def run_blackboard_stage(records, args):
     if bb_dir not in sys.path:
         sys.path.insert(0, bb_dir)  # use blackboard/blackboard_core.py, not the stale root copy
     import blackboard_core as bc
+    if Path(bc.__file__).resolve().parent != Path(bb_dir).resolve():
+        raise RuntimeError(f"Imported the wrong blackboard_core: {bc.__file__} (expected {bb_dir}/)")
 
     bc.HALLUCINATION_RISK_THRESHOLD = args.threshold
     if not args.enable_web:
@@ -338,9 +568,10 @@ def run_blackboard_stage(records, args):
             for s in range(0, len(docs), 200):
                 bc.add_knowledge_documents(docs[s:s + 200], ids=ids[s:s + 200],
                                            metadatas=[{"source": "eval_dataset"}] * len(docs[s:s + 200]))
-        print(f"[stage 2] knowledge base: {len(docs)} documents loaded")
+        print(f"[stage 2] knowledge base: {len(docs)} ORACLE documents loaded (gold knowledge from the eval items). "
+              "Report this as an upper bound / oracle-retrieval result, NOT as a closed-book result.")
     else:
-        print("[stage 2] knowledge base: EMPTY (--no_knowledge)")
+        print("[stage 2] knowledge base: EMPTY (closed-book; default)")
 
     # ---- parallel stage 2 ------------------------------------------------
     # Each worker thread gets its own Blackboard + Orchestrator (the module-level
@@ -393,16 +624,26 @@ def run_blackboard_stage(records, args):
         if not raw.strip():
             row["status"] = "EMPTY_ANSWER"
         else:
-            try:
-                out = bc.process_response(prompt=r["question"], response=raw, confidence_score=score)
-                row["status"] = out["status"]
-                row["final_response"] = out["final_response"]
-                row["evidence_source"] = out.get("evidence_source")
-                vr = out.get("verification_result") or {}
-                row["verdict"] = vr.get("verdict")
-            except Exception as exc:  # one bad API call must not kill the run
-                row["status"] = "ERROR"
-                row["error"] = f"{type(exc).__name__}: {exc}"[:300]
+            attempts = 1 + max(0, getattr(args, "retries", 0))
+            for attempt in range(attempts):
+                try:
+                    out = bc.process_response(prompt=r["question"], response=raw, confidence_score=score)
+                    row["status"] = out["status"]
+                    row["final_response"] = out["final_response"]
+                    row["evidence_source"] = out.get("evidence_source")
+                    vr = out.get("verification_result") or {}
+                    row["verdict"] = vr.get("verdict")
+                    row["error"] = None
+                    break
+                except Exception as exc:  # one bad API call must not kill the run
+                    row["error"] = f"{type(exc).__name__}: {exc}"[:300]
+                    if attempt + 1 < attempts:
+                        time.sleep(min(30.0, 2.0 ** attempt))
+            row["attempts"] = attempt + 1
+            if row["status"] is None:
+                # persistent failure: either count it as a failure, or fall back to the original answer
+                row["status"] = "ERROR_FALLBACK" if getattr(args, "fallback_on_error", False) else "ERROR"
+                row["final_response"] = raw
         row["seconds"] = round(time.time() - t0, 2)
         return row
 
@@ -474,7 +715,7 @@ def paired_bootstrap(base: List[str], bb: List[str], iters: int = 2000, seed: in
     }
 
 
-def build_report(records, rows, base_labels, bb_labels, args) -> Dict[str, Any]:
+def build_report(records, rows, base_labels, bb_labels, args, extra: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     base = arm_metrics(base_labels)
     bb = arm_metrics(bb_labels)
     abs_red = base["hallucination_rate"] - bb["hallucination_rate"]
@@ -482,14 +723,23 @@ def build_report(records, rows, base_labels, bb_labels, args) -> Dict[str, Any]:
 
     transitions = Counter(f"{a} -> {b}" for a, b in zip(base_labels, bb_labels))
     by_status = Counter(r["status"] for r in rows)
-    triggered = sum(1 for r in rows if r["status"] not in ("SKIPPED_LOW_RISK", "EMPTY_ANSWER", "ERROR"))
+    triggered = sum(1 for r in rows if r["status"] not in ("SKIPPED_LOW_RISK", "EMPTY_ANSWER", "ERROR", "ERROR_FALLBACK"))
 
-    return {
+    n = len(base_labels)
+    # Processing errors are NOT fixes: the paired hallucination test only uses pairs where the blackboard produced an answer.
+    ok_pairs = [(a, b) for a, b in zip(base_labels, bb_labels) if a != PROCESSING_ERROR and b != PROCESSING_ERROR]
+    b_only = sum(1 for a, b in ok_pairs if a == HALLUCINATED and b != HALLUCINATED)
+    w_only = sum(1 for a, b in ok_pairs if a != HALLUCINATED and b == HALLUCINATED)
+    fail = lambda x: x in (HALLUCINATED, PROCESSING_ERROR)
+    f_fixed = sum(1 for a, b in zip(base_labels, bb_labels) if fail(a) and not fail(b))
+    f_broken = sum(1 for a, b in zip(base_labels, bb_labels) if not fail(a) and fail(b))
+    extra = extra or {}
+    rep = {
         "config": {
             "n_questions": len(records),
             "threshold": args.threshold,
             "default_score_when_no_probe": args.default_score,
-            "knowledge_base": "empty" if args.no_knowledge else "dataset knowledge (pooled)",
+            "knowledge_base": "none (closed-book)" if args.no_knowledge else "ORACLE: gold knowledge from eval items (upper bound, not closed-book)",
             "web_search": bool(args.enable_web),
             "isolate_memory": bool(args.isolate_memory),
             "match_mode": args.match,
@@ -506,7 +756,23 @@ def build_report(records, rows, base_labels, bb_labels, args) -> Dict[str, Any]:
         "harmed": transitions.get(f"{CORRECT} -> {HALLUCINATED}", 0),
         "lost_to_over_abstention": transitions.get(f"{CORRECT} -> {ABSTAINED}", 0),
         "errors": by_status.get("ERROR", 0),
+        "fallbacks_to_original_answer": by_status.get("ERROR_FALLBACK", 0),
+        "wilson_ci95_hallucination_rate": {
+            "without_blackboard": wilson_ci(base["hallucinated"], n),
+            "with_blackboard": wilson_ci(bb["hallucinated"], n),
+        },
+        "wilson_ci95_failure_rate": {
+            "without_blackboard": wilson_ci(round(base["failure_rate"] * n), n),
+            "with_blackboard": wilson_ci(round(bb["failure_rate"] * n), n),
+        },
+        "mcnemar_exact_p_failure": mcnemar_exact(f_fixed, f_broken),
+        "paired_fixed_vs_broken_failure": {"fixed": f_fixed, "broken": f_broken},
+        "paired_pairs_used_for_hallucination_test": len(ok_pairs),
+        "mcnemar_exact_p_hallucination": mcnemar_exact(b_only, w_only),
+        "paired_fixed_vs_broken": {"fixed": b_only, "broken": w_only},
+        **extra,
     }
+    return rep
 
 
 def format_summary(rep: Dict[str, Any]) -> str:
@@ -535,7 +801,7 @@ def format_summary(rep: Dict[str, Any]) -> str:
         f"Blackboard ran on {rep['blackboard_triggered']} of {b['n']} answers. "
         f"Made worse (correct -> wrong): {rep['harmed']}. "
         f"Lost to over-abstaining (correct -> abstained): {rep['lost_to_over_abstention']}. "
-        f"API errors: {rep['errors']}.",
+        f"API errors: {rep['errors']}. Fell back to the original answer after retries: {rep['fallbacks_to_original_answer']}.",
         "",
         "Status counts: " + ", ".join(f"{k}={v}" for k, v in sorted(rep["status_counts"].items())),
         "",
@@ -543,6 +809,47 @@ def format_summary(rep: Dict[str, Any]) -> str:
     ]
     for k, v in sorted(rep["transitions_baseline_to_blackboard"].items()):
         lines.append(f"- {k}: {v}")
+    lo0, hi0 = rep["wilson_ci95_hallucination_rate"]["without_blackboard"]
+    lo1, hi1 = rep["wilson_ci95_hallucination_rate"]["with_blackboard"]
+    lines += ["",
+              f"Wilson 95% CI on hallucination rate: without [{100*lo0:.1f}, {100*hi0:.1f}], with [{100*lo1:.1f}, {100*hi1:.1f}]. "
+              f"Paired fixed/broken (error-free pairs only, n={rep['paired_pairs_used_for_hallucination_test']}) = "
+              f"{rep['paired_fixed_vs_broken']['fixed']}/{rep['paired_fixed_vs_broken']['broken']}, "
+              f"exact McNemar p = {rep['mcnemar_exact_p_hallucination']:.4f}. "
+              f"Failure basis (errors count as failures): {rep['paired_fixed_vs_broken_failure']['fixed']}/"
+              f"{rep['paired_fixed_vs_broken_failure']['broken']}, p = {rep['mcnemar_exact_p_failure']:.4f}.",
+              f"Knowledge base: {rep['config']['knowledge_base']}."]
+    if rep.get("strict_grading"):
+        sg = rep["strict_grading"]
+        lines += ["", "Grading sensitivity (strict match: answer must equal gold after normalisation):",
+                  f"- hallucination rate without / with blackboard: {pct(sg['without_blackboard']['hallucination_rate'])} / {pct(sg['with_blackboard']['hallucination_rate'])}"]
+    if rep.get("probe_detection"):
+        pd_ = rep["probe_detection"]
+        lines += ["", f"Probe detection on held-out eval answers: AUROC {pd_['auroc']:.3f} "
+                      f"(95% CI {pd_['ci95_low']:.3f}-{pd_['ci95_high']:.3f}; n={pd_['n']}, wrong={pd_['n_wrong']})."]
+    if rep.get("probe_detection", {}).get("at_threshold"):
+        t = rep["probe_detection"]["at_threshold"]
+        f = lambda v: "n/a" if v is None else f"{v:.3f}"
+        ci = t["precision_ci95"]
+        lines += [f"Probe at threshold {t['threshold']:.2f}: precision {f(t['precision'])}"
+                  + (f" (95% CI {ci[0]:.3f}-{ci[1]:.3f})" if ci else "")
+                  + f", recall {f(t['recall'])}, F1 {f(t['f1'])}; flags {100*t['flagged_rate']:.1f}% of answers "
+                  f"(TP {t['tp']}, FP {t['fp']}, FN {t['fn']}, TN {t['tn']})."]
+    if rep.get("complete_case"):
+        cc = rep["complete_case"]
+        lines += ["", f"Complete-case (only the {cc['n']} items where the blackboard ran; {cc['excluded']} errored/fell back excluded): "
+                      f"hallucination rate {pct(cc['without_blackboard']['hallucination_rate'])} -> {pct(cc['with_blackboard']['hallucination_rate'])}, "
+                      f"abstention {pct(cc['without_blackboard']['abstention_rate'])} -> {pct(cc['with_blackboard']['abstention_rate'])}, "
+                      f"accuracy {pct(cc['without_blackboard']['accuracy'])} -> {pct(cc['with_blackboard']['accuracy'])}."]
+    if rep.get("llm_only_control"):
+        c = rep["llm_only_control"]
+        lines += ["", "Control: strong LLM answering closed-book, no blackboard",
+                  f"- hallucination rate {pct(c['metrics']['hallucination_rate'])}, accuracy {pct(c['metrics']['accuracy'])}, "
+                  f"abstention {pct(c['metrics']['abstention_rate'])}",
+                  f"- blackboard minus control hallucination rate: {100*c['blackboard_minus_control_hallucination']:+.1f} points "
+                  f"(95% CI {100*c['ci95_low']:+.1f} to {100*c['ci95_high']:+.1f}); negative = blackboard better",
+                  f"- same on failure rate (errors count as failures): {100*c['blackboard_minus_control_failure']:+.1f} points "
+                  f"(95% CI {100*c['failure_ci95_low']:+.1f} to {100*c['failure_ci95_high']:+.1f})"]
     return "\n".join(lines)
 
 
@@ -579,12 +886,30 @@ def main():
     bbg.add_argument("--default_score", type=float, default=1.0,
                      help="risk score used when a record has no probe score (1.0 = always flagged)")
     bbg.add_argument("--chroma_dir", default="./eval_chroma", help="isolated ChromaDB dir for the eval")
-    bbg.add_argument("--no_knowledge", action="store_true", help="ablation: empty knowledge base")
+    bbg.add_argument("--oracle_knowledge", action="store_true",
+                     help="load the dataset's gold 'knowledge' into the KB. ORACLE setting: leaks the answer "
+                          "source, report only as an upper bound. Default (off) is closed-book.")
+    bbg.add_argument("--no_knowledge", action="store_true", help="deprecated: closed-book is now the default")
     bbg.add_argument("--enable_web", action="store_true", help="allow Tavily web-search fallback")
     bbg.add_argument("--isolate_memory", action="store_true",
                      help="every question sees an empty episodic memory (no cross-question leakage)")
     bbg.add_argument("--workers", type=int, default=8,
                      help="parallel questions in stage 2 (lower it if Groq returns 429s)")
+
+    bbg.add_argument("--retries", type=int, default=3,
+                     help="retry a failed blackboard call this many times (exponential backoff) before giving up")
+    bbg.add_argument("--fallback_on_error", action="store_true",
+                     help="if a call still fails after retries, keep the ORIGINAL answer (status ERROR_FALLBACK). "
+                          "Fallbacks are counted and reported separately, plus a complete-case analysis on items where "
+                          "the blackboard really ran. Without this flag such items are PROCESSING_ERROR failures.")
+
+    gd = ap.add_argument_group("leakage guards / controls")
+    gd.add_argument("--probe_train_indices", default=None,
+                    help="rows the probe was trained on (legacy probes), e.g. '0-99'; excluded from eval")
+    gd.add_argument("--allow_train_overlap", action="store_true",
+                    help="run even if train/test overlap cannot be ruled out (NOT paper-clean)")
+    gd.add_argument("--llm_only_control", action="store_true",
+                    help="also grade the strong LLM answering closed-book with no blackboard (needs GROQ_API_KEY)")
 
     gr = ap.add_argument_group("grading / output")
     gr.add_argument("--match", default="lenient", choices=["lenient", "strict"])
@@ -604,15 +929,20 @@ def main():
         spec = (spec + "," if spec else "") + ",".join(Path(args.indices_file).read_text().split())
     indices = parse_indices(spec)
 
+    args.no_knowledge = not args.oracle_knowledge
+    ex = probe_exclusions(args)
+
     if args.answers_file:
         records = load_dataset(args.answers_file, "generic", limit=args.limit, seed=args.seed,
-                               shuffle=args.shuffle, start=args.start, indices=indices)
+                               shuffle=args.shuffle, start=args.start, indices=indices,
+                               exclude_ids=ex["ids"], exclude_questions=ex["questions"])
         if any("answer" not in r for r in records):
             ap.error("--answers_file rows need an 'answer' field (use stage-1 output, or add model answers).")
         print(f"Loaded {len(records)} records with answers from {args.answers_file}")
     else:
         records = load_dataset(args.dataset, args.format, args.q_field, args.a_field, args.k_field,
-                               args.limit, args.seed, args.shuffle, start=args.start, indices=indices)
+                               args.limit, args.seed, args.shuffle, start=args.start, indices=indices,
+                               exclude_ids=ex["ids"], exclude_questions=ex["questions"])
         print(f"Loaded {len(records)} questions from {args.dataset}")
         records = run_generation_stage(records, args)
         with open(out_dir / "generations.jsonl", "w", encoding="utf-8") as f:
@@ -622,6 +952,9 @@ def main():
         if args.generate_only:
             return
 
+    enforce_probe_guard(args, ex, bool(args.probe) or any(r.get("prob_hallucinated") is not None for r in records))
+    print(f"Excluded {LOAD_STATS.get('excluded_probe_train', 0)} probe-training rows; "
+          f"dropped {LOAD_STATS.get('duplicates_dropped', 0)} duplicate questions.")
     print("Using dataset rows:", [r["id"] for r in records])
 
     # ---- blackboard ------------------------------------------------------
@@ -640,7 +973,44 @@ def main():
         list(zip(records, rows)),
     )
 
-    report = build_report(records, rows, base_labels, bb_labels, args)
+    extra: Dict[str, Any] = {}
+    strict_base = [grade(r["answer"], r["gold"], "strict", judge) for r in records]
+    strict_bb = [PROCESSING_ERROR if x["status"] == "ERROR" else grade(x["final_response"], r["gold"], "strict", judge)
+                 for r, x in zip(records, rows)]
+    extra["strict_grading"] = {"without_blackboard": arm_metrics(strict_base), "with_blackboard": arm_metrics(strict_bb)}
+    pa = probe_auroc_report(records, base_labels, seed=args.seed)
+    if pa:
+        extra["probe_detection"] = pa
+        pt = probe_threshold_report(records, base_labels, args.threshold)
+        if pt:
+            extra["probe_detection"]["at_threshold"] = pt
+    # complete-case analysis: only items where the blackboard actually ran to completion
+    cc = [i for i, x in enumerate(rows) if x["status"] not in ("ERROR", "ERROR_FALLBACK")]
+    if len(cc) < len(rows):
+        extra["complete_case"] = {"n": len(cc), "excluded": len(rows) - len(cc),
+                                  "without_blackboard": arm_metrics([base_labels[i] for i in cc]),
+                                  "with_blackboard": arm_metrics([bb_labels[i] for i in cc])}
+    ctrl_answers = ctrl_labels = None
+    if args.llm_only_control:
+        ctrl_answers = run_llm_only_control(records, bc.groq_caller)
+        ctrl_labels = [PROCESSING_ERROR if a.startswith("[CONTROL_ERROR") else grade(a, r["gold"], args.match, judge)
+                       for r, a in zip(records, ctrl_answers)]
+        d = paired_bootstrap(ctrl_labels, bb_labels, seed=args.seed)   # positive = blackboard better than control
+        cm, bm = arm_metrics(ctrl_labels), arm_metrics(bb_labels)
+        extra["llm_only_control"] = {
+            "metrics": cm,
+            # blackboard minus control; negative = blackboard is better
+            "blackboard_minus_control_hallucination": bm["hallucination_rate"] - cm["hallucination_rate"],
+            "ci95_low": -d["abs_reduction_ci95_high"], "ci95_high": -d["abs_reduction_ci95_low"],
+            "blackboard_minus_control_failure": bm["failure_rate"] - cm["failure_rate"],
+            "failure_ci95_low": -d["abs_failure_reduction_ci95_high"], "failure_ci95_high": -d["abs_failure_reduction_ci95_low"],
+        }
+        with open(out_dir / "control_answers.jsonl", "w", encoding="utf-8") as f:
+            for r, a, l in zip(records, ctrl_answers, ctrl_labels):
+                f.write(json.dumps({"id": r["id"], "answer": a, "label": l}, ensure_ascii=False) + "\n")
+
+    report = build_report(records, rows, base_labels, bb_labels, args, extra)
+    write_manifest(out_dir, args, records, bc, ex)
     summary = format_summary(report)
 
     # ---- save ------------------------------------------------------------

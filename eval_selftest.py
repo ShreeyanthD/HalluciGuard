@@ -13,6 +13,7 @@ eval_data/sample_qa.jsonl. It does NOT measure real model quality.
     python eval_selftest.py
 """
 
+import zlib
 import json
 import os
 import re
@@ -42,7 +43,7 @@ class HashEF:
         for text in input:
             v = np.zeros(256, dtype=np.float32)
             for tok in re.findall(r"\w+", text.lower()):
-                v[hash(tok) % 256] += 1.0
+                v[zlib.crc32(tok.encode()) % 256] += 1.0
             n = np.linalg.norm(v) or 1.0
             out.append(v / n)
         return out
@@ -155,8 +156,8 @@ def test_stage2():
         r["answer"] = wrong.get(r["question"], r["gold"][0])   # rest already correct
         r["prob_hallucinated"] = 0.9 if r["question"] in wrong else 0.1
     args = Namespace(threshold=0.70, default_score=1.0, chroma_dir=os.environ["CHROMA_PERSIST_DIRECTORY"],
-                     no_knowledge=False, enable_web=False, isolate_memory=False, match="lenient",
-                     llm_judge=False, seed=0)
+                     no_knowledge=False, oracle_knowledge=True, enable_web=False, isolate_memory=False, match="lenient",
+                     llm_judge=False, seed=0, workers=1)
     rows, _ = ev.run_blackboard_stage(recs, args)
     base = [ev.grade(r["answer"], r["gold"]) for r in recs]
     bb = [ev.grade(x["final_response"], r["gold"]) for r, x in zip(recs, rows)]
@@ -185,8 +186,89 @@ def test_stage2():
     print("ok  empty-KB ablation abstains instead of hallucinating")
 
 
+def test_stats_and_guards():
+    assert abs(ev.auroc([.9, .8, .2, .1], [1, 1, 0, 0]) - 1.0) < 1e-9
+    assert abs(ev.auroc([.5, .5, .5, .5], [1, 0, 1, 0]) - 0.5) < 1e-9
+    lo, hi = ev.wilson_ci(5, 10); assert 0.2 < lo < 0.5 < hi < 0.8
+    assert ev.mcnemar_exact(0, 0) == 1.0 and ev.mcnemar_exact(10, 0) < 0.01
+    # probe-training rows and duplicate questions are excluded
+    import json as _j, tempfile as _t
+    rows = [{"question": f"Q{i}?", "right_answer": "a", "knowledge": "k"} for i in range(10)]
+    rows.append({"question": "Q3?", "right_answer": "a", "knowledge": "k"})   # duplicate
+    f = _t.NamedTemporaryFile("w", suffix=".jsonl", delete=False)
+    f.write("\n".join(_j.dumps(r) for r in rows)); f.close()
+    recs = ev.load_dataset(f.name, "halueval", exclude_ids=set(range(0, 5)))
+    assert [r["id"] for r in recs] == [5, 6, 7, 8, 9], [r["id"] for r in recs]
+    assert ev.LOAD_STATS["excluded_probe_train"] == 6
+    recs = ev.load_dataset(f.name, "halueval", exclude_questions={ev.norm_q("Q1?")})
+    assert "Q1?" not in [r["question"] for r in recs] and ev.LOAD_STATS["duplicates_dropped"] == 1
+    # guard refuses unknown-overlap probe runs
+    ns = Namespace(allow_train_overlap=False)
+    try:
+        ev.enforce_probe_guard(ns, {"source": None}, True); raise AssertionError("guard did not fire")
+    except SystemExit:
+        pass
+    ev.enforce_probe_guard(ns, {"source": None}, False)           # no probe scores -> fine
+    ev.enforce_probe_guard(ns, {"source": "x"}, True)             # overlap source known -> fine
+    # control arm uses the supplied caller
+    out = ev.run_llm_only_control([{"question": "Who wrote Hamlet?"}], lambda p, temperature=0: "Shakespeare")
+    assert out == ["Shakespeare"]
+    # processing errors must not be counted as hallucination fixes
+    _A = lambda: Namespace(no_knowledge=True, enable_web=False, isolate_memory=False, llm_judge=False, match="lenient", threshold=.7, default_score=1.0, seed=0, probe_train_indices=None)
+    recs2 = [{"id": i, "question": f"q{i}", "gold": ["a"], "answer": "wrong", "prob_hallucinated": .9} for i in range(4)]
+    rows2 = [{"status": "ERROR", "verdict": "", "final_response": "", "evidence_source": "", "error": "x"} for _ in range(4)]
+    rep2 = ev.build_report(recs2, rows2, [ev.HALLUCINATED] * 4, [ev.PROCESSING_ERROR] * 4, _A())
+    assert rep2["paired_fixed_vs_broken"] == {"fixed": 0, "broken": 0}, rep2["paired_fixed_vs_broken"]
+    assert rep2["paired_pairs_used_for_hallucination_test"] == 0
+    print("ok  stats, probe-overlap guard, dedupe, control arm, errors-not-fixes")
+
+
+def test_retry_and_fallback():
+    recs = ev.load_dataset(str(ROOT / "eval_data" / "sample_qa.jsonl"), "halueval")
+    for r in recs:
+        r["answer"] = "WRONG"
+        r["prob_hallucinated"] = 0.9
+    bad = {recs[0]["question"], recs[1]["question"]}
+    calls = {}
+    def flaky(prompt, response, confidence_score):
+        calls[prompt] = calls.get(prompt, 0) + 1
+        if prompt in bad:
+            raise RuntimeError("429")
+        if prompt == recs[2]["question"] and calls[prompt] < 3:
+            raise RuntimeError("503")                      # succeeds on 3rd attempt
+        return {"status": "BLACKBOARD_PROCESSED", "final_response": "fixed", "verification_result": {}}
+    import blackboard_core as bc0
+    real, real_sleep = bc0.process_response, ev.time.sleep
+    bc0.process_response, ev.time.sleep = flaky, lambda s: None
+    try:
+        base = dict(threshold=0.7, default_score=1.0, chroma_dir=os.environ["CHROMA_PERSIST_DIRECTORY"], no_knowledge=True,
+                    oracle_knowledge=False, enable_web=False, isolate_memory=False, match="lenient", llm_judge=False,
+                    seed=0, workers=1, retries=2)
+        rows, _ = ev.run_blackboard_stage(recs, Namespace(**base, fallback_on_error=True))
+        assert rows[0]["status"] == rows[1]["status"] == "ERROR_FALLBACK" and rows[0]["final_response"] == "WRONG"
+        assert rows[2]["status"] == "BLACKBOARD_PROCESSED" and rows[2]["attempts"] == 3
+        assert calls[recs[0]["question"]] == 3                                  # 1 try + 2 retries
+        rows2, _ = ev.run_blackboard_stage(recs, Namespace(**base, fallback_on_error=False))
+        assert rows2[0]["status"] == "ERROR"
+    finally:
+        bc0.process_response, ev.time.sleep = real, real_sleep
+    base_l = [ev.grade(r["answer"], r["gold"]) for r in recs]
+    bb_l = [ev.PROCESSING_ERROR if x["status"] == "ERROR" else ev.grade(x["final_response"], r["gold"]) for r, x in zip(recs, rows)]
+    rep = ev.build_report(recs, rows, base_l, bb_l, Namespace(**base, fallback_on_error=True))
+    assert rep["fallbacks_to_original_answer"] == 2 and rep["errors"] == 0
+    # probe precision/recall: all answers wrong and all flagged -> precision 1, recall 1
+    pt = ev.probe_threshold_report(recs, base_l, 0.7)
+    assert pt["precision"] == 1.0 and pt["recall"] == 1.0 and pt["fp"] == 0
+    pt2 = ev.probe_threshold_report([{"prob_hallucinated": s} for s in (.9, .8, .2, .1)],
+                                    [ev.HALLUCINATED, ev.CORRECT, ev.HALLUCINATED, ev.CORRECT], 0.5)
+    assert (pt2["tp"], pt2["fp"], pt2["fn"], pt2["tn"]) == (1, 1, 1, 1) and abs(pt2["f1"] - 0.5) < 1e-9
+    print("ok  retries, fallback-on-error, probe precision/recall")
+
+
 if __name__ == "__main__":
     test_grading()
     test_processing_error_accounting()
+    test_stats_and_guards()
     test_stage2()
+    test_retry_and_fallback()
     print("\nAll self-tests passed.")

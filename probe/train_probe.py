@@ -138,6 +138,9 @@ def main():
               "regularization (lower --C), or checking for leakage.")
 
     bundle = {
+        # Evaluation scripts exclude these so the probe is never scored on its own training data.
+        "train_questions": [str(g) for g in groups[train_idx]],
+        "test_questions": [str(g) for g in groups[test_idx]],
         "scaler": scaler,
         "classifier": clf,
         "feature_dim": X.shape[1],

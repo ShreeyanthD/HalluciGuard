@@ -241,3 +241,21 @@ results; these settings change the experiment.
 **Abstention:** the base model's system prompt now allows the single word
 `Unknown` instead of forcing an answer, and `AbstentionDetector` treats a bare
 `Unknown` / `IDK` as an abstention.
+
+## Paper-clean evaluation protocol
+
+```bash
+# retrain the probe with the updated train_probe.py (records train_questions), then:
+python eval_pipeline.py --dataset HaluEval-main/data/qa_data.json --probe probe/probe.joblib \
+    --shuffle --seed 0 --limit 500 --llm_only_control --out_dir eval_runs/paper
+# legacy probe (trained on rows 0-99): add  --probe_train_indices 0-99
+```
+
+- Probe-training rows (and duplicates of them) are excluded; the run refuses to start if overlap can't be ruled out.
+- Closed-book is the default. `--oracle_knowledge` loads gold knowledge from the eval items: report it only as an upper bound.
+- `--llm_only_control` grades the same strong LLM answering with no blackboard; claim the architecture only if it beats this.
+- Outputs: `metrics.json` (Wilson CIs, paired bootstrap, exact McNemar, strict-match sensitivity, probe AUROC), `per_item.csv`, `run_manifest.json` (commit, hashes, versions, row ids).
+- API failures: calls are retried (`--retries 3`, backoff). `--fallback_on_error` keeps the original answer when a call still fails; those items are counted as `ERROR_FALLBACK` and the report adds a complete-case table (items where the blackboard really ran). Quote the complete-case numbers alongside the headline, because fallbacks dilute any reduction.
+- The report includes probe precision/recall/F1 at `--threshold` (positive = wrong raw answer) and AUROC.
+- Choose the risk threshold on a separate dev split, never on the eval rows.
+- Do not run the root `server.py`/`blackboard_core.py`: they are stale copies of `blackboard/`.
