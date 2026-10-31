@@ -223,6 +223,45 @@ def test_stats_and_guards():
     print("ok  stats, probe-overlap guard, dedupe, control arm, errors-not-fixes")
 
 
+def test_preflight():
+    import io, contextlib
+    recs = ev.load_dataset(str(ROOT / "eval_data" / "sample_qa.jsonl"), "halueval")
+    for r in recs:
+        r["answer"] = "WRONG"; r["prob_hallucinated"] = 0.9
+    a = Namespace(preflight=3, threshold=0.7, default_score=1.0, chroma_dir=os.environ["CHROMA_PERSIST_DIRECTORY"],
+                  no_knowledge=True, oracle_knowledge=False, enable_web=False, isolate_memory=False, match="lenient",
+                  llm_judge=False, seed=0, workers=4, retries=0, fallback_on_error=True, llm_only_control=True)
+    import blackboard_core as bc0
+    class _U: total_tokens = 100
+    class _R: usage = _U()
+    class _Comp:
+        def create(self, *a, **k): return _R()
+        class with_raw_response:
+            @staticmethod
+            def create(*a, **k):
+                class H:
+                    headers = {"x-ratelimit-limit-tokens": "8000", "x-ratelimit-remaining-requests": "500"}
+                return H()
+    fake_comp = _Comp()
+    real_client = bc0._groq_client
+    class _Chat: completions = fake_comp
+    class _Client: chat = _Chat()
+    real_pr, real_gc = bc0.process_response, bc0.groq_caller
+    def fake_pr(prompt, response, confidence_score):
+        fake_comp.create(); return {"status": "BLACKBOARD_PROCESSED", "final_response": "fixed", "verification_result": {}}
+    bc0._groq_client, bc0.process_response = _Client(), fake_pr
+    bc0.groq_caller = lambda p, temperature=0: fake_comp.create() and "x"
+    buf = io.StringIO()
+    try:
+        with contextlib.redirect_stdout(buf):
+            ev.run_preflight(recs, a)
+    finally:
+        bc0._groq_client, bc0.process_response, bc0.groq_caller = real_client, real_pr, real_gc
+    out = buf.getvalue()
+    assert "100 tokens per item" in out and "PROJECTED full run" in out and "--workers" in out, out
+    print("ok  preflight")
+
+
 def test_rate_limit_handling():
     P = ev.RateLimit.parse_wait
     assert P("Please try again in 7m12.5s. Need more") == 432.5
@@ -346,4 +385,5 @@ if __name__ == "__main__":
     test_retry_and_fallback()
     test_control_parallel_resume_and_checkpoint()
     test_rate_limit_handling()
+    test_preflight()
     print("\nAll self-tests passed.")

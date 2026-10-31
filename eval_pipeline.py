@@ -540,6 +540,92 @@ def run_llm_only_control(records, llm_caller, workers: int = 1, retries: int = 0
 
 
 # ---------------------------------------------------------------------------
+# Preflight: measure real API cost/limits on a few items BEFORE the long run
+# ---------------------------------------------------------------------------
+
+def run_preflight(records, args) -> None:
+    import copy
+    bc = load_blackboard_module(args)
+    usage = {"calls": 0, "tokens": 0}
+    comp = bc._groq_client.chat.completions
+    orig_create = comp.create
+
+    def counting(*a, **k):
+        r = orig_create(*a, **k)
+        usage["calls"] += 1
+        u = getattr(r, "usage", None)
+        usage["tokens"] += int(getattr(u, "total_tokens", 0) or 0)
+        return r
+
+    comp.create = counting
+    try:
+        def routed(r):
+            sc = r.get("prob_hallucinated")
+            return (sc if sc is not None else args.default_score) >= args.threshold or \
+                grade(r["answer"], r["gold"], "lenient") == ABSTAINED
+        todo = [r for r in records if routed(r)]
+        n = min(max(1, args.preflight), len(todo))
+        print(f"[preflight] {len(records)} questions, {len(todo)} will go through the blackboard; testing {n}")
+        sub = copy.copy(args)
+        sub.workers, sub.retries, sub.fallback_on_error = 1, 1, False
+        t0 = time.time()
+        rows, _ = run_blackboard_stage(todo[:n], sub)
+        secs = max(1e-6, time.time() - t0)
+        errs = [x for x in rows if x["status"] == "ERROR"]
+        if usage["calls"] == 0 and len(errs) < n:
+            print("[preflight] WARNING: no LLM calls were counted, so token estimates below are NOT valid.")
+        tok_item = usage["tokens"] / n
+        print(f"\n[preflight] blackboard: {usage['calls']/n:.1f} LLM calls and {tok_item:,.0f} tokens per item, {secs/n:.1f}s per item")
+        print(f"[preflight] {len(errs)}/{n} items failed")
+        for x in errs[:3]:
+            print("   error:", (x.get("error") or "")[:400])
+
+        if len(errs) == n:
+            print("[preflight] EVERY test item failed, so no estimate is possible. Fix the API problem shown above first "
+                  "(429 = rate/quota limit, 401 = bad key, connection = no internet), then rerun --preflight.")
+            return
+        before = usage["tokens"]
+        m = min(5, len(records))
+        for r in records[:m]:
+            try:
+                bc.groq_caller(CONTROL_PROMPT.format(q=r["question"]), temperature=0.0)
+            except Exception as exc:
+                print("   control error:", str(exc)[:300])
+        tok_ctrl = (usage["tokens"] - before) / m
+
+        total = len(todo) * tok_item + (len(records) * tok_ctrl if args.llm_only_control else 0)
+        print(f"[preflight] control arm: {tok_ctrl:,.0f} tokens per question")
+        print(f"[preflight] PROJECTED full run: {total:,.0f} tokens"
+              f" ({len(todo) * tok_item:,.0f} blackboard"
+              + (f" + {len(records) * tok_ctrl:,.0f} control" if args.llm_only_control else "") + ")")
+        hdr = {}
+        try:
+            raw = comp.with_raw_response.create(model=bc.GROQ_MODEL, max_tokens=1,
+                                                messages=[{"role": "user", "content": "hi"}])
+            hdr = {k.lower(): v for k, v in raw.headers.items() if k.lower().startswith("x-ratelimit")}
+        except Exception as exc:
+            print("[preflight] could not read rate-limit headers:", str(exc)[:200])
+        for k, v in sorted(hdr.items()):
+            print(f"   {k}: {v}")
+        try:
+            tpm = float(hdr.get("x-ratelimit-limit-tokens", ""))
+            rpd = float(hdr.get("x-ratelimit-remaining-requests", ""))
+            rate = tok_item / (secs / n) * 60            # tokens/min used by ONE worker
+            w = max(1, int(0.6 * tpm / rate))
+            print(f"[preflight] one worker uses ~{rate:,.0f} tokens/min; with a {tpm:,.0f} TPM limit use --workers {w} or fewer")
+            calls_needed = len(todo) * usage["calls"] / n + (len(records) if args.llm_only_control else 0)
+            print(f"[preflight] requests/day: ~{calls_needed:,.0f} needed, {rpd:,.0f} remaining -> "
+                  + ("OK" if calls_needed < 0.8 * rpd else "WILL NOT FIT TODAY"))
+        except ValueError:
+            pass
+        print("[preflight] The daily TOKEN limit is not in the headers. Open console.groq.com/settings/limits, find "
+              f"{bc.GROQ_MODEL} 'tokens per day', and compare it with the projected total above. "
+              "If projected > 80% of it, split the run over days with --reuse_stage2 --retry_errors.")
+    finally:
+        comp.create = orig_create
+
+
+# ---------------------------------------------------------------------------
 # Run manifest
 # ---------------------------------------------------------------------------
 
@@ -1027,6 +1113,8 @@ def main():
                           "Fallbacks are counted and reported separately, plus a complete-case analysis on items where "
                           "the blackboard really ran. Without this flag such items are PROCESSING_ERROR failures.")
 
+    bbg.add_argument("--preflight", type=int, default=0, metavar="N",
+                     help="test N items, print tokens/item, projected total and Groq limits, then EXIT without writing results")
     bbg.add_argument("--retry_errors", action="store_true",
                      help="with --reuse_stage2: rerun ONLY items whose saved status is ERROR / ERROR_FALLBACK, keep the rest")
     bbg.add_argument("--reuse_stage2", action="store_true",
@@ -1081,6 +1169,10 @@ def main():
         if args.generate_only:
             return
 
+    if args.preflight:
+        enforce_probe_guard(args, ex, bool(args.probe) or any(r.get("prob_hallucinated") is not None for r in records))
+        run_preflight(records, args)
+        raise SystemExit(0)
     enforce_probe_guard(args, ex, bool(args.probe) or any(r.get("prob_hallucinated") is not None for r in records))
     print(f"Excluded {LOAD_STATS.get('excluded_probe_train', 0)} probe-training rows; "
           f"dropped {LOAD_STATS.get('duplicates_dropped', 0)} duplicate questions.")
