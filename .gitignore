@@ -30,3 +30,7 @@ Thumbs.db
 
 # --- misc ---
 scratch/
+
+# eval scratch
+eval_chroma/
+eval_runs/

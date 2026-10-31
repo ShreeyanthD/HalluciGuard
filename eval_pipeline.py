@@ -426,6 +426,54 @@ def enforce_probe_guard(args, ex: Dict[str, Any], uses_probe_scores: bool) -> No
 
 
 # ---------------------------------------------------------------------------
+# Rate-limit handling shared by every worker thread (Groq 429s)
+# ---------------------------------------------------------------------------
+
+class RateLimit:
+    """When ANY worker gets a 429, ALL workers pause for the server-suggested time.
+    A per-day quota (long wait) stops further API calls instead of burning retries."""
+    import threading as _th
+    _lock = _th.Lock()
+    until = 0.0                     # monotonic time before which no call should start
+    exhausted: Optional[str] = None  # message if a daily quota is used up
+
+    @staticmethod
+    def parse_wait(msg: str) -> Optional[float]:
+        """'Please try again in 7m12.5s' / '560ms' / '1.2s' -> seconds."""
+        m = re.search(r"try again in\s+((?:\d+(?:\.\d+)?(?:ms|h|m|s))+)", msg)
+        if not m:
+            return None
+        mult = {"ms": 0.001, "s": 1.0, "m": 60.0, "h": 3600.0}
+        return sum(float(n) * mult[u] for n, u in re.findall(r"(\d+(?:\.\d+)?)(ms|h|m|s)", m.group(1)))
+
+    @classmethod
+    def note(cls, exc: Exception) -> bool:
+        """Register a failure; returns True if it was a rate limit (the shared pause is then set)."""
+        msg = str(exc)
+        if "429" not in msg and "rate limit" not in msg.lower():
+            return False
+        wait = cls.parse_wait(msg)
+        wait = 20.0 if wait is None else wait
+        with cls._lock:
+            if re.search(r"per day|\(TPD\)|\(RPD\)", msg) and wait > 900:
+                if cls.exhausted is None:
+                    cls.exhausted = msg[:400]
+                    print(f"\n[RATE LIMIT] DAILY QUOTA EXHAUSTED (retry in ~{wait/60:.0f} min). Stopping API calls; "
+                          "finished work is kept. Rerun later with --reuse_stage2 --retry_errors.\n{0}".format(msg[:300]))
+            else:
+                cls.until = max(cls.until, time.monotonic() + min(wait, 300.0) * 1.1 + 1.0)
+        return True
+
+    @classmethod
+    def wait(cls) -> None:
+        while True:
+            d = cls.until - time.monotonic()
+            if d <= 0:
+                return
+            time.sleep(min(d, 5.0))
+
+
+# ---------------------------------------------------------------------------
 # Control arm: the strong LLM answering closed-book, with no blackboard
 # ---------------------------------------------------------------------------
 
@@ -435,19 +483,60 @@ CONTROL_PROMPT = (
     "the single word: Unknown\n\nQuestion: {q}")
 
 
-def run_llm_only_control(records, llm_caller) -> List[str]:
+def run_llm_only_control(records, llm_caller, workers: int = 1, retries: int = 0,
+                         checkpoint: Optional[Path] = None) -> List[str]:
     """Same model family that powers the blackboard agents, asked the question
     directly. If the blackboard doesn't beat this, its gain is just 'a bigger
-    model answered' rather than the architecture."""
-    out = []
-    for i, r in enumerate(records):
-        try:
-            out.append(llm_caller(CONTROL_PROMPT.format(q=r["question"]), temperature=0.0).strip())
-        except Exception as exc:
-            out.append(f"[CONTROL_ERROR {type(exc).__name__}]")
-        if (i + 1) % 10 == 0 or i + 1 == len(records):
-            print(f"[control] {i + 1}/{len(records)}")
-    return out
+    model answered' rather than the architecture.
+    Parallel, retried, and resumable: answers already in `checkpoint` (same question, not an error) are reused."""
+    import threading
+    key = lambda i, r: (r.get("id", i), r["question"])
+    done: Dict[Any, str] = {}
+    if checkpoint and Path(checkpoint).exists():
+        for l in open(checkpoint, encoding="utf-8"):
+            if l.strip():
+                x = json.loads(l)
+                if not x["answer"].startswith("[CONTROL_ERROR"):
+                    done[(x["id"], x["question"])] = x["answer"]
+    out: List[Optional[str]] = [done.get(key(i, r)) for i, r in enumerate(records)]
+    todo = [i for i, a in enumerate(out) if a is None]
+    if done:
+        print(f"[control] resuming: {len(records) - len(todo)} answers reused, {len(todo)} to go")
+    lock = threading.Lock()
+    ck = open(checkpoint, "a", encoding="utf-8") if checkpoint else None
+
+    def one(i):
+        r = records[i]
+        ans = None
+        for attempt in range(1 + max(0, retries)):
+            if RateLimit.exhausted:
+                ans = "[CONTROL_ERROR QUOTA_EXHAUSTED]"
+                break
+            RateLimit.wait()
+            try:
+                ans = llm_caller(CONTROL_PROMPT.format(q=r["question"]), temperature=0.0).strip()
+                break
+            except Exception as exc:
+                ans = f"[CONTROL_ERROR {type(exc).__name__}]"
+                if not RateLimit.note(exc) and attempt < retries:
+                    time.sleep(min(30.0, 2.0 ** attempt))
+        with lock:
+            out[i] = ans
+            if ck and not ans.startswith("[CONTROL_ERROR"):
+                ck.write(json.dumps({"id": r.get("id", i), "question": r["question"], "answer": ans}, ensure_ascii=False) + "\n")
+                ck.flush()
+
+    n_done = 0
+    try:
+        with ThreadPoolExecutor(max_workers=max(1, workers)) as ex:
+            for _ in ex.map(one, todo):
+                n_done += 1
+                if n_done % 10 == 0 or n_done == len(todo):
+                    print(f"[control] {n_done}/{len(todo)}")
+    finally:
+        if ck:
+            ck.close()
+    return out  # type: ignore[return-value]
 
 
 # ---------------------------------------------------------------------------
@@ -539,7 +628,7 @@ def run_generation_stage(records, args) -> List[Dict[str, Any]]:
 # Stage 2: blackboard
 # ---------------------------------------------------------------------------
 
-def run_blackboard_stage(records, args):
+def load_blackboard_module(args):
     # Isolated store so the eval never touches your real halluciguard_chroma.
     # Must be set BEFORE blackboard_core is imported (it opens Chroma at import).
     os.environ["CHROMA_PERSIST_DIRECTORY"] = str(Path(args.chroma_dir).resolve())
@@ -549,6 +638,34 @@ def run_blackboard_stage(records, args):
     import blackboard_core as bc
     if Path(bc.__file__).resolve().parent != Path(bb_dir).resolve():
         raise RuntimeError(f"Imported the wrong blackboard_core: {bc.__file__} (expected {bb_dir}/)")
+    return bc
+
+
+STAGE2_KEYS = ("threshold", "default_score", "no_knowledge", "enable_web", "isolate_memory", "fallback_on_error")
+
+
+def save_stage2_rows(path: Path, records, rows, args) -> None:
+    """Checkpoint right after stage 2 so a crash/kill in grading or the control arm never costs a rerun."""
+    meta = {k: getattr(args, k, None) for k in STAGE2_KEYS}
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(json.dumps({"_meta": meta}) + "\n")
+        for r, x in zip(records, rows):
+            f.write(json.dumps({"id": r["id"], "question": r["question"], **x}, ensure_ascii=False) + "\n")
+
+
+def load_stage2_rows(path: Path, records, args):
+    lines = [json.loads(l) for l in open(path, encoding="utf-8") if l.strip()]
+    meta, saved = lines[0]["_meta"], lines[1:]
+    cur = {k: getattr(args, k, None) for k in STAGE2_KEYS}
+    if meta != cur:
+        raise SystemExit(f"--reuse_stage2: saved rows were made with different settings.\n  saved:   {meta}\n  current: {cur}")
+    if [(x["id"], x["question"]) for x in saved] != [(r["id"], r["question"]) for r in records]:
+        raise SystemExit("--reuse_stage2: saved rows do not match the questions selected for this run.")
+    return [{k: v for k, v in x.items() if k not in ("id", "question")} for x in saved]
+
+
+def run_blackboard_stage(records, args):
+    bc = load_blackboard_module(args)
 
     bc.HALLUCINATION_RISK_THRESHOLD = args.threshold
     if not args.enable_web:
@@ -626,6 +743,10 @@ def run_blackboard_stage(records, args):
         else:
             attempts = 1 + max(0, getattr(args, "retries", 0))
             for attempt in range(attempts):
+                if RateLimit.exhausted:
+                    row["error"] = "QUOTA_EXHAUSTED: " + RateLimit.exhausted[:200]
+                    break
+                RateLimit.wait()
                 try:
                     out = bc.process_response(prompt=r["question"], response=raw, confidence_score=score)
                     row["status"] = out["status"]
@@ -637,7 +758,7 @@ def run_blackboard_stage(records, args):
                     break
                 except Exception as exc:  # one bad API call must not kill the run
                     row["error"] = f"{type(exc).__name__}: {exc}"[:300]
-                    if attempt + 1 < attempts:
+                    if not RateLimit.note(exc) and attempt + 1 < attempts:
                         time.sleep(min(30.0, 2.0 ** attempt))
             row["attempts"] = attempt + 1
             if row["status"] is None:
@@ -843,6 +964,9 @@ def format_summary(rep: Dict[str, Any]) -> str:
                       f"accuracy {pct(cc['without_blackboard']['accuracy'])} -> {pct(cc['with_blackboard']['accuracy'])}."]
     if rep.get("llm_only_control"):
         c = rep["llm_only_control"]
+        if c.get("control_errors"):
+            lines += ["", f"WARNING: {c['control_errors']} control calls failed after retries; the comparison below is NOT valid. "
+                          "Rerun the same command: finished control answers are resumed from control_partial.jsonl."]
         lines += ["", "Control: strong LLM answering closed-book, no blackboard",
                   f"- hallucination rate {pct(c['metrics']['hallucination_rate'])}, accuracy {pct(c['metrics']['accuracy'])}, "
                   f"abstention {pct(c['metrics']['abstention_rate'])}",
@@ -896,12 +1020,17 @@ def main():
     bbg.add_argument("--workers", type=int, default=8,
                      help="parallel questions in stage 2 (lower it if Groq returns 429s)")
 
-    bbg.add_argument("--retries", type=int, default=3,
+    bbg.add_argument("--retries", type=int, default=6,
                      help="retry a failed blackboard call this many times (exponential backoff) before giving up")
     bbg.add_argument("--fallback_on_error", action="store_true",
                      help="if a call still fails after retries, keep the ORIGINAL answer (status ERROR_FALLBACK). "
                           "Fallbacks are counted and reported separately, plus a complete-case analysis on items where "
                           "the blackboard really ran. Without this flag such items are PROCESSING_ERROR failures.")
+
+    bbg.add_argument("--retry_errors", action="store_true",
+                     help="with --reuse_stage2: rerun ONLY items whose saved status is ERROR / ERROR_FALLBACK, keep the rest")
+    bbg.add_argument("--reuse_stage2", action="store_true",
+                     help="skip stage 2 and reuse <out_dir>/bb_rows.jsonl (refuses if settings/questions differ)")
 
     gd = ap.add_argument_group("leakage guards / controls")
     gd.add_argument("--probe_train_indices", default=None,
@@ -958,7 +1087,23 @@ def main():
     print("Using dataset rows:", [r["id"] for r in records])
 
     # ---- blackboard ------------------------------------------------------
-    rows, bc = run_blackboard_stage(records, args)
+    stage2_path = out_dir / "bb_rows.jsonl"
+    if args.reuse_stage2 and stage2_path.exists():
+        rows = load_stage2_rows(stage2_path, records, args)
+        bc = load_blackboard_module(args)
+        print(f"[stage 2] reused {len(rows)} saved rows from {stage2_path}")
+        if args.retry_errors:
+            bad = [i for i, x in enumerate(rows) if x["status"] in ("ERROR", "ERROR_FALLBACK")]
+            print(f"[stage 2] --retry_errors: rerunning {len(bad)} failed items")
+            if bad:
+                new_rows, _ = run_blackboard_stage([records[i] for i in bad], args)
+                for i, nr in zip(bad, new_rows):
+                    rows[i] = nr
+                save_stage2_rows(stage2_path, records, rows, args)
+    else:
+        rows, bc = run_blackboard_stage(records, args)
+        save_stage2_rows(stage2_path, records, rows, args)
+        print(f"[stage 2] checkpoint saved -> {stage2_path} (rerun with --reuse_stage2 to skip it)")
 
     # ---- grade both arms -------------------------------------------------
     judge = make_llm_judge(bc.groq_caller) if args.llm_judge else None
@@ -992,13 +1137,15 @@ def main():
                                   "with_blackboard": arm_metrics([bb_labels[i] for i in cc])}
     ctrl_answers = ctrl_labels = None
     if args.llm_only_control:
-        ctrl_answers = run_llm_only_control(records, bc.groq_caller)
+        ctrl_answers = run_llm_only_control(records, bc.groq_caller, workers=args.workers, retries=args.retries,
+                                            checkpoint=out_dir / "control_partial.jsonl")
         ctrl_labels = [PROCESSING_ERROR if a.startswith("[CONTROL_ERROR") else grade(a, r["gold"], args.match, judge)
                        for r, a in zip(records, ctrl_answers)]
         d = paired_bootstrap(ctrl_labels, bb_labels, seed=args.seed)   # positive = blackboard better than control
         cm, bm = arm_metrics(ctrl_labels), arm_metrics(bb_labels)
         extra["llm_only_control"] = {
             "metrics": cm,
+            "control_errors": sum(1 for a in ctrl_answers if a.startswith("[CONTROL_ERROR")),
             # blackboard minus control; negative = blackboard is better
             "blackboard_minus_control_hallucination": bm["hallucination_rate"] - cm["hallucination_rate"],
             "ci95_low": -d["abs_reduction_ci95_high"], "ci95_high": -d["abs_reduction_ci95_low"],

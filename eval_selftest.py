@@ -223,6 +223,79 @@ def test_stats_and_guards():
     print("ok  stats, probe-overlap guard, dedupe, control arm, errors-not-fixes")
 
 
+def test_rate_limit_handling():
+    P = ev.RateLimit.parse_wait
+    assert P("Please try again in 7m12.5s. Need more") == 432.5
+    assert abs(P("... try again in 560ms") - 0.56) < 1e-9 and P("try again in 1.2s") == 1.2 and P("nothing") is None
+    ev.RateLimit.until, ev.RateLimit.exhausted = 0.0, None
+    assert ev.RateLimit.note(RuntimeError("Error code: 429 - rate limit ... Please try again in 3s")) is True
+    assert 3.0 < ev.RateLimit.until - ev.time.monotonic() < 6.0          # shared pause set (3s * 1.1 + 1)
+    assert ev.RateLimit.note(ValueError("boom")) is False
+    ev.RateLimit.until = 0.0
+    ev.RateLimit.note(RuntimeError("429 Rate limit reached ... on tokens per day (TPD): Limit 200000 ... Please try again in 40m3s"))
+    assert ev.RateLimit.exhausted and "tokens per day" in ev.RateLimit.exhausted
+    # once exhausted, no API calls are made and items are marked as errors
+    n = {"c": 0}
+    def caller(prompt, temperature=0):
+        n["c"] += 1; return "x"
+    out = ev.run_llm_only_control([{"id": 1, "question": "q"}], caller, workers=1, retries=3)
+    assert n["c"] == 0 and out[0].startswith("[CONTROL_ERROR")
+    ev.RateLimit.until, ev.RateLimit.exhausted = 0.0, None
+    # a worker that gets a 429 pauses, then succeeds on retry
+    state = {"c": 0}
+    def flaky429(prompt, temperature=0):
+        state["c"] += 1
+        if state["c"] == 1:
+            raise RuntimeError("Error code: 429 ... try again in 0.01s")
+        return "ok"
+    real = ev.time.sleep
+    out = ev.run_llm_only_control([{"id": 1, "question": "q"}], flaky429, workers=1, retries=2)
+    assert out == ["ok"] and state["c"] == 2
+    ev.RateLimit.until, ev.RateLimit.exhausted = 0.0, None
+    print("ok  rate-limit parse, shared pause, daily-quota stop")
+
+
+def test_control_parallel_resume_and_checkpoint():
+    import tempfile, threading, time as _t
+    d = Path(tempfile.mkdtemp())
+    recs = [{"id": i, "question": f"Q{i}?"} for i in range(20)]
+    calls, lock, fails = [], threading.Lock(), {"Q3?": 1}
+    def caller(prompt, temperature=0):
+        q = prompt.rsplit("Question: ", 1)[1]
+        with lock:
+            calls.append(q)
+            if fails.get(q, 0) > 0:
+                fails[q] -= 1
+                raise RuntimeError("transient 500")
+        _t.sleep(0.05)
+        return "ans-" + q
+    ev.RateLimit.until, ev.RateLimit.exhausted = 0.0, None
+    ev_sleep, ev.time.sleep = ev.time.sleep, lambda s: None
+    try:
+        t0 = _t.time()
+        out = ev.run_llm_only_control(recs, caller, workers=10, retries=2, checkpoint=d / "c.jsonl")
+        assert out == ["ans-" + r["question"] for r in recs] and _t.time() - t0 < 0.5   # parallel, retried
+        calls.clear()
+        out2 = ev.run_llm_only_control(recs, caller, workers=4, retries=0, checkpoint=d / "c.jsonl")
+        assert out2 == out and calls == []                                               # fully resumed, no API calls
+        (d / "c.jsonl").write_text("".join(l for l in open(d / "c.jsonl") if '"Q5?"' not in l and '"Q6?"' not in l))
+        ev.run_llm_only_control(recs, caller, workers=4, retries=0, checkpoint=d / "c.jsonl")
+        assert sorted(calls) == ["Q5?", "Q6?"]                                           # only the missing ones
+    finally:
+        ev.time.sleep = ev_sleep
+    # stage-2 checkpoint round trip, and refusal on mismatched settings / questions
+    rows = [{"status": "BLACKBOARD_PROCESSED", "final_response": "x", "verdict": None, "error": None} for _ in recs]
+    a = Namespace(threshold=.7, default_score=1.0, no_knowledge=True, enable_web=False, isolate_memory=False, fallback_on_error=True, retries=3)
+    ev.save_stage2_rows(d / "bb.jsonl", recs, rows, a)
+    assert ev.load_stage2_rows(d / "bb.jsonl", recs, a) == rows
+    for bad_args, bad_recs in ((Namespace(**{**vars(a), "threshold": .5}), recs), (a, recs[:-1])):
+        try:
+            ev.load_stage2_rows(d / "bb.jsonl", bad_recs, bad_args); raise AssertionError("should refuse")
+        except SystemExit:
+            pass
+    print("ok  control parallel + resume, stage-2 checkpoint/reuse")
+
+
 def test_retry_and_fallback():
     recs = ev.load_dataset(str(ROOT / "eval_data" / "sample_qa.jsonl"), "halueval")
     for r in recs:
@@ -233,7 +306,7 @@ def test_retry_and_fallback():
     def flaky(prompt, response, confidence_score):
         calls[prompt] = calls.get(prompt, 0) + 1
         if prompt in bad:
-            raise RuntimeError("429")
+            raise RuntimeError("transient 500")
         if prompt == recs[2]["question"] and calls[prompt] < 3:
             raise RuntimeError("503")                      # succeeds on 3rd attempt
         return {"status": "BLACKBOARD_PROCESSED", "final_response": "fixed", "verification_result": {}}
@@ -271,4 +344,6 @@ if __name__ == "__main__":
     test_stats_and_guards()
     test_stage2()
     test_retry_and_fallback()
+    test_control_parallel_resume_and_checkpoint()
+    test_rate_limit_handling()
     print("\nAll self-tests passed.")
