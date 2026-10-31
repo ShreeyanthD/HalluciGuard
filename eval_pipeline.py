@@ -452,10 +452,12 @@ class RateLimit:
         msg = str(exc)
         if "429" not in msg and "rate limit" not in msg.lower():
             return False
-        wait = cls.parse_wait(msg)
-        wait = 20.0 if wait is None else wait
+        parsed = cls.parse_wait(msg)
+        wait = 20.0 if parsed is None else parsed
+        per_day = bool(re.search(r"per day|\(TPD\)|\(RPD\)", msg))
         with cls._lock:
-            if re.search(r"per day|\(TPD\)|\(RPD\)", msg) and wait > 900:
+            # a daily limit with a long (or unknown) reset time will not clear during this run
+            if per_day and (parsed is None or wait > 900):
                 if cls.exhausted is None:
                     cls.exhausted = msg[:400]
                     print(f"\n[RATE LIMIT] DAILY QUOTA EXHAUSTED (retry in ~{wait/60:.0f} min). Stopping API calls; "

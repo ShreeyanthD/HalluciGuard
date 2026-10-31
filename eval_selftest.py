@@ -273,6 +273,11 @@ def test_rate_limit_handling():
     ev.RateLimit.until = 0.0
     ev.RateLimit.note(RuntimeError("429 Rate limit reached ... on tokens per day (TPD): Limit 200000 ... Please try again in 40m3s"))
     assert ev.RateLimit.exhausted and "tokens per day" in ev.RateLimit.exhausted
+    ev.RateLimit.until, ev.RateLimit.exhausted = 0.0, None
+    ev.RateLimit.note(RuntimeError("429 Rate limit reached on requests per day (RPD): Limit 1000, Used 1000"))   # no reset time given
+    assert ev.RateLimit.exhausted, "daily limit without a parsable reset time must stop the run"
+    ev.RateLimit.until, ev.RateLimit.exhausted = 0.0, None
+    ev.RateLimit.note(RuntimeError("429 Rate limit reached on tokens per day (TPD) ... Please try again in 40m3s"))
     # once exhausted, no API calls are made and items are marked as errors
     n = {"c": 0}
     def caller(prompt, temperature=0):
