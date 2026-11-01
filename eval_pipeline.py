@@ -620,8 +620,8 @@ def run_preflight(records, args) -> None:
                   + ("OK" if calls_needed < 0.8 * rpd else "WILL NOT FIT TODAY"))
         except ValueError:
             pass
-        print("[preflight] The daily TOKEN limit is not in the headers. Open console.groq.com/settings/limits, find "
-              f"{bc.GROQ_MODEL} 'tokens per day', and compare it with the projected total above. "
+        print("[preflight] The daily TOKEN limit is not in the headers. Open your provider's limits page (Groq: "
+              f"console.groq.com/settings/limits), find {bc.GROQ_MODEL} 'tokens per day', and compare it with the projected total above. "
               "If projected > 80% of it, split the run over days with --reuse_stage2 --retry_errors.")
     finally:
         comp.create = orig_create
@@ -663,6 +663,7 @@ def write_manifest(out_dir: Path, args, records, bc, guard) -> None:
         "git_dirty": bool(_git("status", "--porcelain")),
         "blackboard_core_file": getattr(bc, "__file__", None),
         "groq_model": getattr(bc, "GROQ_MODEL", None),
+        "llm_base_url": getattr(bc, "LLM_BASE_URL", None),
         "generator_model": args.model_id, "probe_layer": args.layer,
         "sha256": {"dataset": _sha256(args.dataset), "answers_file": _sha256(args.answers_file),
                    "probe": _sha256(args.probe)},

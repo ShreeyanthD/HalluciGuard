@@ -1296,7 +1296,10 @@ class Orchestrator:
 
 from openai import OpenAI
 
-GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
+# Any OpenAI-compatible provider works: set LLM_BASE_URL, LLM_API_KEY (and GROQ_MODEL for the model id).
+# Defaults keep the original behaviour (Groq, GROQ_API_KEY).
+LLM_BASE_URL = os.getenv("LLM_BASE_URL", "https://api.groq.com/openai/v1")
+GROQ_API_KEY = os.environ.get("LLM_API_KEY") or os.environ.get("GROQ_API_KEY")
 if not GROQ_API_KEY:
     # CHANGED: the notebook used getpass() here, which blocks waiting for
     # keyboard input. That's fine in a notebook cell but would hang a
@@ -1308,7 +1311,7 @@ if not GROQ_API_KEY:
     )
 
 GROQ_MODEL = os.getenv("GROQ_MODEL", "openai/gpt-oss-120b")
-_groq_client = OpenAI(base_url="https://api.groq.com/openai/v1", api_key=GROQ_API_KEY)
+_groq_client = OpenAI(base_url=LLM_BASE_URL, api_key=GROQ_API_KEY)
 
 
 def groq_caller(prompt, *, temperature=0.0, response_mime_type=None, **kw):
@@ -1330,7 +1333,7 @@ def groq_caller(prompt, *, temperature=0.0, response_mime_type=None, **kw):
     raise RuntimeError(f"Groq failed after 3 attempts: {last}")
 
 
-print("Groq caller ready:", GROQ_MODEL)
+print("LLM caller ready:", GROQ_MODEL, "@", LLM_BASE_URL)
 
 
 # ---------------------------------------------------------------------------

@@ -260,6 +260,7 @@ python eval_pipeline.py --dataset HaluEval-main/data/qa_data.json --probe probe/
 - Groq 429s: all workers share one cooldown (the wait Groq suggests), a daily-quota error stops further calls instead of burning retries, and `--reuse_stage2 --retry_errors` reruns only the failed items next time. Use few workers on a limited tier, e.g. `--workers 2`.
 - Before a long run: `--preflight 15` tests 15 items, prints tokens/item, a projected total, Groq's rate limits and a suggested `--workers`, then exits without writing results.
 - Daily quotas: every finished item is checkpointed to `bb_partial.jsonl`. `--max_items N` calls the API for at most N items per run, and a daily-quota stop does the same automatically. Just rerun the SAME command to continue; the control arm is skipped until stage 2 is complete. `requirements-eval.txt` is the CPU-only install for stage 2.
+- Other provider (any OpenAI-compatible API): set `LLM_BASE_URL`, `LLM_API_KEY` and `GROQ_MODEL` (the model id) before running, e.g. Cerebras: `LLM_BASE_URL=https://api.cerebras.ai/v1`, `GROQ_MODEL=gpt-oss-120b`. The provider and URL are recorded in `run_manifest.json`; report them in the paper.
 - The report includes probe precision/recall/F1 at `--threshold` (positive = wrong raw answer) and AUROC.
 - Choose the risk threshold on a separate dev split, never on the eval rows.
 - Do not run the root `server.py`/`blackboard_core.py`: they are stale copies of `blackboard/`.

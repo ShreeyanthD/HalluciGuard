@@ -260,6 +260,25 @@ def test_partial_checkpoint_and_max_items():
     print("ok  per-item checkpoint, resume, --max_items")
 
 
+def test_provider_override():
+    import subprocess, tempfile
+    code = ("import sys; sys.path.insert(0, 'blackboard'); import blackboard_core as b; "
+            "print('RESULT', str(b._groq_client.base_url).rstrip('/'), b.GROQ_MODEL, b._groq_client.api_key)")
+    def run(extra):
+        env = {**os.environ, "CHROMA_PERSIST_DIRECTORY": tempfile.mkdtemp(), "GROQ_API_KEY": "g-key", **extra}
+        for k in ("LLM_BASE_URL", "LLM_API_KEY"):
+            if k not in extra:
+                env.pop(k, None)
+        out = subprocess.run([sys.executable, "-c", code], cwd=str(ROOT), env=env, capture_output=True, text=True, timeout=120)
+        line = [l for l in out.stdout.splitlines() if l.startswith("RESULT")]
+        assert line, out.stderr[-500:]
+        return line[0].split()[1:]
+    assert run({}) == ["https://api.groq.com/openai/v1", "openai/gpt-oss-120b", "g-key"]          # default unchanged
+    assert run({"LLM_BASE_URL": "https://api.cerebras.ai/v1", "LLM_API_KEY": "c-key", "GROQ_MODEL": "gpt-oss-120b"}) == \
+        ["https://api.cerebras.ai/v1", "gpt-oss-120b", "c-key"]
+    print("ok  provider override (LLM_BASE_URL / LLM_API_KEY / GROQ_MODEL)")
+
+
 def test_preflight():
     import io, contextlib
     recs = ev.load_dataset(str(ROOT / "eval_data" / "sample_qa.jsonl"), "halueval")
@@ -427,6 +446,7 @@ if __name__ == "__main__":
     test_retry_and_fallback()
     test_control_parallel_resume_and_checkpoint()
     test_rate_limit_handling()
+    test_provider_override()
     test_preflight()
     test_partial_checkpoint_and_max_items()
     print("\nAll self-tests passed.")
