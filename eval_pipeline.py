@@ -490,7 +490,7 @@ CONTROL_PROMPT = (
 
 
 def run_llm_only_control(records, llm_caller, workers: int = 1, retries: int = 0,
-                         checkpoint: Optional[Path] = None) -> List[str]:
+                         checkpoint: Optional[Path] = None, model_tag: Optional[str] = None) -> List[str]:
     """Same model family that powers the blackboard agents, asked the question
     directly. If the blackboard doesn't beat this, its gain is just 'a bigger
     model answered' rather than the architecture.
@@ -502,6 +502,8 @@ def run_llm_only_control(records, llm_caller, workers: int = 1, retries: int = 0
         for l in open(checkpoint, encoding="utf-8"):
             if l.strip():
                 x = json.loads(l)
+                if x.get("model") != model_tag:      # answers from a different model/provider are never reused
+                    continue
                 if not x["answer"].startswith("[CONTROL_ERROR"):
                     done[(x["id"], x["question"])] = x["answer"]
     out: List[Optional[str]] = [done.get(key(i, r)) for i, r in enumerate(records)]
@@ -529,7 +531,7 @@ def run_llm_only_control(records, llm_caller, workers: int = 1, retries: int = 0
         with lock:
             out[i] = ans
             if ck and not ans.startswith("[CONTROL_ERROR"):
-                ck.write(json.dumps({"id": r.get("id", i), "question": r["question"], "answer": ans}, ensure_ascii=False) + "\n")
+                ck.write(json.dumps({"id": r.get("id", i), "question": r["question"], "answer": ans, "model": model_tag}, ensure_ascii=False) + "\n")
                 ck.flush()
 
     n_done = 0
@@ -727,10 +729,14 @@ def load_blackboard_module(args):
     import blackboard_core as bc
     if Path(bc.__file__).resolve().parent != Path(bb_dir).resolve():
         raise RuntimeError(f"Imported the wrong blackboard_core: {bc.__file__} (expected {bb_dir}/)")
+    # checkpoints are tied to the model/provider that produced them, so they can never be mixed silently
+    args.llm_model = getattr(bc, "GROQ_MODEL", None)
+    args.llm_base_url = getattr(bc, "LLM_BASE_URL", None)
     return bc
 
 
-STAGE2_KEYS = ("threshold", "default_score", "no_knowledge", "enable_web", "isolate_memory", "fallback_on_error")
+STAGE2_KEYS = ("threshold", "default_score", "no_knowledge", "enable_web", "isolate_memory", "fallback_on_error",
+               "llm_model", "llm_base_url")
 
 
 def save_stage2_rows(path: Path, records, rows, args) -> None:
@@ -1243,8 +1249,8 @@ def main():
     # ---- blackboard ------------------------------------------------------
     stage2_path = out_dir / "bb_rows.jsonl"
     if args.reuse_stage2 and stage2_path.exists():
-        rows = load_stage2_rows(stage2_path, records, args)
         bc = load_blackboard_module(args)
+        rows = load_stage2_rows(stage2_path, records, args)
         print(f"[stage 2] reused {len(rows)} saved rows from {stage2_path}")
         if args.retry_errors:
             bad = [i for i, x in enumerate(rows) if x["status"] in ("ERROR", "ERROR_FALLBACK")]
@@ -1296,7 +1302,8 @@ def main():
               "(rerun the same command); the control arm then runs and resumes automatically.")
     if args.llm_only_control and not incomplete:
         ctrl_answers = run_llm_only_control(records, bc.groq_caller, workers=args.workers, retries=args.retries,
-                                            checkpoint=out_dir / "control_partial.jsonl")
+                                            checkpoint=out_dir / "control_partial.jsonl",
+                                            model_tag=f"{args.llm_base_url}|{args.llm_model}")
         ctrl_labels = [PROCESSING_ERROR if a.startswith("[CONTROL_ERROR") else grade(a, r["gold"], args.match, judge)
                        for r, a in zip(records, ctrl_answers)]
         d = paired_bootstrap(ctrl_labels, bb_labels, seed=args.seed)   # positive = blackboard better than control

@@ -260,6 +260,31 @@ def test_partial_checkpoint_and_max_items():
     print("ok  per-item checkpoint, resume, --max_items")
 
 
+def test_checkpoints_are_tied_to_the_model():
+    import tempfile
+    d = Path(tempfile.mkdtemp())
+    recs = [{"id": i, "question": f"Q{i}?"} for i in range(3)]
+    n = {"c": 0}
+    def caller(prompt, temperature=0):
+        n["c"] += 1; return "a"
+    ev.run_llm_only_control(recs, caller, checkpoint=d / "c.jsonl", model_tag="url|modelA")
+    n["c"] = 0
+    ev.run_llm_only_control(recs, caller, checkpoint=d / "c.jsonl", model_tag="url|modelA")
+    assert n["c"] == 0                                              # same model: resumed
+    ev.run_llm_only_control(recs, caller, checkpoint=d / "c.jsonl", model_tag="url|modelB")
+    assert n["c"] == 3                                              # different model: nothing reused
+    rows = [{"status": "BLACKBOARD_PROCESSED", "final_response": "x", "verdict": None, "error": None} for _ in recs]
+    a = Namespace(threshold=.7, default_score=1.0, no_knowledge=True, enable_web=False, isolate_memory=False,
+                  fallback_on_error=True, llm_model="modelA", llm_base_url="url")
+    ev.save_stage2_rows(d / "bb.jsonl", recs, rows, a)
+    ev.load_stage2_rows(d / "bb.jsonl", recs, a)
+    try:
+        ev.load_stage2_rows(d / "bb.jsonl", recs, Namespace(**{**vars(a), "llm_model": "modelB"})); raise AssertionError("must refuse")
+    except SystemExit:
+        pass
+    print("ok  checkpoints refuse to mix models")
+
+
 def test_provider_override():
     import subprocess, tempfile
     code = ("import sys; sys.path.insert(0, 'blackboard'); import blackboard_core as b; "
@@ -446,6 +471,7 @@ if __name__ == "__main__":
     test_retry_and_fallback()
     test_control_parallel_resume_and_checkpoint()
     test_rate_limit_handling()
+    test_checkpoints_are_tied_to_the_model()
     test_provider_override()
     test_preflight()
     test_partial_checkpoint_and_max_items()
