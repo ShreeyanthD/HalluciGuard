@@ -223,6 +223,43 @@ def test_stats_and_guards():
     print("ok  stats, probe-overlap guard, dedupe, control arm, errors-not-fixes")
 
 
+def test_partial_checkpoint_and_max_items():
+    import tempfile
+    d = Path(tempfile.mkdtemp())
+    recs = ev.load_dataset(str(ROOT / "eval_data" / "sample_qa.jsonl"), "halueval")
+    for r in recs:
+        r["answer"] = "WRONG"; r["prob_hallucinated"] = 0.9
+    calls = []
+    import blackboard_core as bc0
+    real = bc0.process_response
+    def fake(prompt, response, confidence_score):
+        calls.append(prompt); return {"status": "BLACKBOARD_PROCESSED", "final_response": "fixed", "verification_result": {}}
+    bc0.process_response = fake
+    base = dict(threshold=0.7, default_score=1.0, chroma_dir=os.environ["CHROMA_PERSIST_DIRECTORY"], no_knowledge=True,
+                oracle_knowledge=False, enable_web=False, isolate_memory=False, match="lenient", llm_judge=False,
+                seed=0, workers=1, retries=0, fallback_on_error=True)
+    try:
+        rows, _ = ev.run_blackboard_stage(recs, Namespace(**base, max_items=4), partial_path=d / "p.jsonl")
+        assert len(calls) == 4 and sum(1 for x in rows if str(x["error"]).startswith("MAX_ITEMS")) == len(recs) - 4
+        calls.clear()
+        rows, _ = ev.run_blackboard_stage(recs, Namespace(**base, max_items=4), partial_path=d / "p.jsonl")
+        assert len(calls) == 4 and not any(r.startswith("WRONG") for r in calls)      # next 4, first 4 reused
+        rows, _ = ev.run_blackboard_stage(recs, Namespace(**base, max_items=0), partial_path=d / "p.jsonl")
+        assert len(calls) == 4 + (len(recs) - 8)
+        assert all(x["status"] == "BLACKBOARD_PROCESSED" for x in rows), [x["status"] for x in rows]
+        calls.clear()
+        ev.run_blackboard_stage(recs, Namespace(**base, max_items=0), partial_path=d / "p.jsonl")
+        assert calls == []                                                           # everything resumed
+        try:
+            ev.run_blackboard_stage(recs, Namespace(**{**base, "threshold": 0.5}, max_items=0), partial_path=d / "p.jsonl")
+            raise AssertionError("must refuse mismatched settings")
+        except SystemExit:
+            pass
+    finally:
+        bc0.process_response = real
+    print("ok  per-item checkpoint, resume, --max_items")
+
+
 def test_preflight():
     import io, contextlib
     recs = ev.load_dataset(str(ROOT / "eval_data" / "sample_qa.jsonl"), "halueval")
@@ -391,4 +428,5 @@ if __name__ == "__main__":
     test_control_parallel_resume_and_checkpoint()
     test_rate_limit_handling()
     test_preflight()
+    test_partial_checkpoint_and_max_items()
     print("\nAll self-tests passed.")

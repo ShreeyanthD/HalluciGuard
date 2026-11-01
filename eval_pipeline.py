@@ -463,7 +463,11 @@ class RateLimit:
                     print(f"\n[RATE LIMIT] DAILY QUOTA EXHAUSTED (retry in ~{wait/60:.0f} min). Stopping API calls; "
                           "finished work is kept. Rerun later with --reuse_stage2 --retry_errors.\n{0}".format(msg[:300]))
             else:
-                cls.until = max(cls.until, time.monotonic() + min(wait, 300.0) * 1.1 + 1.0)
+                new_until = time.monotonic() + min(wait, 900.0) * 1.05 + 1.0
+                if new_until > cls.until + 1.0:
+                    print(f"[rate limit] Groq 429 - all workers pause {new_until - time.monotonic():.0f}s "
+                          f"(Groq asked for {wait:.0f}s). This is normal throttling, not a freeze.", flush=True)
+                cls.until = max(cls.until, new_until)
         return True
 
     @classmethod
@@ -561,11 +565,7 @@ def run_preflight(records, args) -> None:
 
     comp.create = counting
     try:
-        def routed(r):
-            sc = r.get("prob_hallucinated")
-            return (sc if sc is not None else args.default_score) >= args.threshold or \
-                grade(r["answer"], r["gold"], "lenient") == ABSTAINED
-        todo = [r for r in records if routed(r)]
+        todo = [r for r in records if is_routed(r, args)]
         n = min(max(1, args.preflight), len(todo))
         print(f"[preflight] {len(records)} questions, {len(todo)} will go through the blackboard; testing {n}")
         sub = copy.copy(args)
@@ -752,7 +752,14 @@ def load_stage2_rows(path: Path, records, args):
     return [{k: v for k, v in x.items() if k not in ("id", "question")} for x in saved]
 
 
-def run_blackboard_stage(records, args):
+def is_routed(r, args) -> bool:
+    """Will this item make real API calls? (low-risk, non-abstaining answers are skipped for free.)"""
+    sc = r.get("prob_hallucinated")
+    sc = args.default_score if sc is None else sc
+    return sc >= args.threshold or grade(r["answer"], r["gold"], "lenient") == ABSTAINED
+
+
+def run_blackboard_stage(records, args, partial_path=None):
     bc = load_blackboard_module(args)
 
     bc.HALLUCINATION_RISK_THRESHOLD = args.threshold
@@ -818,7 +825,41 @@ def run_blackboard_stage(records, args):
     bc.orchestrator = _OrchProxy()
     print(f"[stage 2] using {bc.__file__}")
 
+    # ---- per-item checkpoint: finished items survive a kill / disconnect / quota stop ----
+    meta = {k: getattr(args, k, None) for k in STAGE2_KEYS}
+    reuse: Dict[Any, Dict[str, Any]] = {}
+    plock = threading.Lock()
+    pfile = None
+    if partial_path:
+        partial_path = Path(partial_path)
+        if partial_path.exists():
+            lines = [json.loads(l) for l in open(partial_path, encoding="utf-8") if l.strip()]
+            if lines and lines[0].get("_meta") != meta:
+                raise SystemExit(f"{partial_path} was made with different settings; delete it or use another --out_dir.\n"
+                                 f"  saved:   {lines[0].get('_meta')}\n  current: {meta}")
+            for x in lines[1:]:
+                reuse[(x["id"], x["question"])] = x["row"]
+        else:
+            with open(partial_path, "w", encoding="utf-8") as f:
+                f.write(json.dumps({"_meta": meta}) + "\n")
+        pfile = open(partial_path, "a", encoding="utf-8")
+        if reuse:
+            print(f"[stage 2] resuming: {sum(1 for r in records if (r['id'], r['question']) in reuse)} items already done in {partial_path}")
+    api_used = {"n": 0}
+    max_items = getattr(args, "max_items", 0) or 0
+
     def _one(r):
+        key = (r["id"], r["question"])
+        if key in reuse:
+            return reuse[key]
+        row = _one_inner(r)
+        if pfile and row["status"] not in ("ERROR", "ERROR_FALLBACK"):
+            with plock:
+                pfile.write(json.dumps({"id": r["id"], "question": r["question"], "row": row}, ensure_ascii=False) + "\n")
+                pfile.flush()
+        return row
+
+    def _one_inner(r):
         raw = r["answer"]
         score = r.get("prob_hallucinated")
         if score is None:
@@ -830,6 +871,15 @@ def run_blackboard_stage(records, args):
             row["status"] = "EMPTY_ANSWER"
         else:
             attempts = 1 + max(0, getattr(args, "retries", 0))
+            if max_items and is_routed(r, args):
+                with plock:
+                    over = api_used["n"] >= max_items
+                    api_used["n"] += 0 if over else 1
+                if over:
+                    row["error"] = f"MAX_ITEMS_REACHED: --max_items {max_items}"
+                    row["status"] = "ERROR_FALLBACK" if getattr(args, "fallback_on_error", False) else "ERROR"
+                    row["attempts"] = 0
+                    return row
             for attempt in range(attempts):
                 if RateLimit.exhausted:
                     row["error"] = "QUOTA_EXHAUSTED: " + RateLimit.exhausted[:200]
@@ -867,8 +917,14 @@ def run_blackboard_stage(records, args):
         for f in as_completed(futs):
             results[futs[f]] = f.result()
             done += 1
-            if done % 10 == 0 or done == len(records):
-                print(f"[stage 2] {done}/{len(records)}  ({time.time() - t_all:.0f}s)")
+            if done % 5 == 0 or done == len(records):
+                print(f"[stage 2] {done}/{len(records)}  ({time.time() - t_all:.0f}s)", flush=True)
+    if pfile:
+        pfile.close()
+    n_stopped = sum(1 for x in results if x["error"] and str(x["error"]).startswith(("MAX_ITEMS_REACHED", "QUOTA_EXHAUSTED")))
+    if n_stopped:
+        print(f"[stage 2] {n_stopped} items NOT run (--max_items or daily quota). Finished items are saved; "
+              "rerun the same command to continue where this stopped.")
     return results, bc
 
 
@@ -1115,6 +1171,9 @@ def main():
                           "Fallbacks are counted and reported separately, plus a complete-case analysis on items where "
                           "the blackboard really ran. Without this flag such items are PROCESSING_ERROR failures.")
 
+    bbg.add_argument("--max_items", type=int, default=0, metavar="N",
+                     help="call the API for at most N items this run, then stop cleanly (for daily quotas). "
+                          "Finished items are checkpointed; rerun the same command to continue.")
     bbg.add_argument("--preflight", type=int, default=0, metavar="N",
                      help="test N items, print tokens/item, projected total and Groq limits, then EXIT without writing results")
     bbg.add_argument("--retry_errors", action="store_true",
@@ -1190,12 +1249,12 @@ def main():
             bad = [i for i, x in enumerate(rows) if x["status"] in ("ERROR", "ERROR_FALLBACK")]
             print(f"[stage 2] --retry_errors: rerunning {len(bad)} failed items")
             if bad:
-                new_rows, _ = run_blackboard_stage([records[i] for i in bad], args)
+                new_rows, _ = run_blackboard_stage([records[i] for i in bad], args, partial_path=out_dir / "bb_partial.jsonl")
                 for i, nr in zip(bad, new_rows):
                     rows[i] = nr
                 save_stage2_rows(stage2_path, records, rows, args)
     else:
-        rows, bc = run_blackboard_stage(records, args)
+        rows, bc = run_blackboard_stage(records, args, partial_path=out_dir / "bb_partial.jsonl")
         save_stage2_rows(stage2_path, records, rows, args)
         print(f"[stage 2] checkpoint saved -> {stage2_path} (rerun with --reuse_stage2 to skip it)")
 
@@ -1230,7 +1289,11 @@ def main():
                                   "without_blackboard": arm_metrics([base_labels[i] for i in cc]),
                                   "with_blackboard": arm_metrics([bb_labels[i] for i in cc])}
     ctrl_answers = ctrl_labels = None
-    if args.llm_only_control:
+    incomplete = sum(1 for x in rows if x["error"] and str(x["error"]).startswith(("MAX_ITEMS_REACHED", "QUOTA_EXHAUSTED")))
+    if args.llm_only_control and incomplete:
+        print(f"[control] skipped: stage 2 is incomplete ({incomplete} items not run). Finish stage 2 first "
+              "(rerun the same command); the control arm then runs and resumes automatically.")
+    if args.llm_only_control and not incomplete:
         ctrl_answers = run_llm_only_control(records, bc.groq_caller, workers=args.workers, retries=args.retries,
                                             checkpoint=out_dir / "control_partial.jsonl")
         ctrl_labels = [PROCESSING_ERROR if a.startswith("[CONTROL_ERROR") else grade(a, r["gold"], args.match, judge)
