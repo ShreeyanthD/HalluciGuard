@@ -1311,17 +1311,23 @@ if not GROQ_API_KEY:
     )
 
 GROQ_MODEL = os.getenv("GROQ_MODEL", "openai/gpt-oss-120b")
-_groq_client = OpenAI(base_url=LLM_BASE_URL, api_key=GROQ_API_KEY)
+# Optional safety limits for local/self-hosted models that may ramble (defaults leave behaviour unchanged):
+#   LLM_MAX_TOKENS  cap on generated tokens per call      LLM_TIMEOUT  per-request timeout in seconds
+LLM_MAX_TOKENS = int(os.getenv("LLM_MAX_TOKENS", "0") or 0) or None
+_LLM_TIMEOUT = float(os.getenv("LLM_TIMEOUT", "0") or 0) or None
+_groq_client = OpenAI(base_url=LLM_BASE_URL, api_key=GROQ_API_KEY, **({"timeout": _LLM_TIMEOUT} if _LLM_TIMEOUT else {}))
 
 
-def groq_caller(prompt, *, temperature=0.0, response_mime_type=None, **kw):
+def groq_caller(prompt, *, temperature=0.0, response_mime_type=None, max_tokens=None, **kw):
     last = None
+    limit = max_tokens or LLM_MAX_TOKENS
     for attempt in range(3):
         try:
             r = _groq_client.chat.completions.create(
                 model=GROQ_MODEL,
                 temperature=temperature,
                 messages=[{"role": "user", "content": prompt}],
+                **({"max_tokens": limit} if limit else {}),
             )
             text = (r.choices[0].message.content or "").strip()
             if text:

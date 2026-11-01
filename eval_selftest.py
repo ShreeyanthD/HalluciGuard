@@ -285,6 +285,30 @@ def test_checkpoints_are_tied_to_the_model():
     print("ok  checkpoints refuse to mix models")
 
 
+def test_length_cap():
+    import blackboard_core as bc0
+    seen = []
+    class _M:  content = "x"
+    class _C:  message = _M()
+    class _R:  choices = [_C()]
+    class _Comp:
+        def create(self, **k): seen.append(k); return _R()
+    class _Chat: completions = _Comp()
+    class _Client: chat = _Chat()
+    real = bc0._groq_client
+    bc0._groq_client = _Client()
+    try:
+        bc0.groq_caller("q")
+        assert "max_tokens" not in seen[-1]                         # default: unchanged behaviour
+        bc0.groq_caller("q", max_tokens=7)
+        assert seen[-1]["max_tokens"] == 7
+        out = ev.run_llm_only_control([{"id": 1, "question": "q"}], bc0.groq_caller, max_tokens=5)
+        assert out == ["x"] and seen[-1]["max_tokens"] == 5
+    finally:
+        bc0._groq_client = real
+    print("ok  optional length cap (max_tokens)")
+
+
 def test_provider_override():
     import subprocess, tempfile
     code = ("import sys; sys.path.insert(0, 'blackboard'); import blackboard_core as b; "
@@ -472,6 +496,7 @@ if __name__ == "__main__":
     test_control_parallel_resume_and_checkpoint()
     test_rate_limit_handling()
     test_checkpoints_are_tied_to_the_model()
+    test_length_cap()
     test_provider_override()
     test_preflight()
     test_partial_checkpoint_and_max_items()

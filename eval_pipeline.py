@@ -490,7 +490,8 @@ CONTROL_PROMPT = (
 
 
 def run_llm_only_control(records, llm_caller, workers: int = 1, retries: int = 0,
-                         checkpoint: Optional[Path] = None, model_tag: Optional[str] = None) -> List[str]:
+                         checkpoint: Optional[Path] = None, model_tag: Optional[str] = None,
+                         max_tokens: int = 0) -> List[str]:
     """Same model family that powers the blackboard agents, asked the question
     directly. If the blackboard doesn't beat this, its gain is just 'a bigger
     model answered' rather than the architecture.
@@ -522,7 +523,8 @@ def run_llm_only_control(records, llm_caller, workers: int = 1, retries: int = 0
                 break
             RateLimit.wait()
             try:
-                ans = llm_caller(CONTROL_PROMPT.format(q=r["question"]), temperature=0.0).strip()
+                ans = llm_caller(CONTROL_PROMPT.format(q=r["question"]), temperature=0.0,
+                                 **({"max_tokens": max_tokens} if max_tokens else {})).strip()
                 break
             except Exception as exc:
                 ans = f"[CONTROL_ERROR {type(exc).__name__}]"
@@ -592,7 +594,8 @@ def run_preflight(records, args) -> None:
         m = min(5, len(records))
         for r in records[:m]:
             try:
-                bc.groq_caller(CONTROL_PROMPT.format(q=r["question"]), temperature=0.0)
+                bc.groq_caller(CONTROL_PROMPT.format(q=r["question"]), temperature=0.0,
+                               **({"max_tokens": args.control_max_tokens} if getattr(args, "control_max_tokens", 0) else {}))
             except Exception as exc:
                 print("   control error:", str(exc)[:300])
         tok_ctrl = (usage["tokens"] - before) / m
@@ -666,6 +669,7 @@ def write_manifest(out_dir: Path, args, records, bc, guard) -> None:
         "blackboard_core_file": getattr(bc, "__file__", None),
         "groq_model": getattr(bc, "GROQ_MODEL", None),
         "llm_base_url": getattr(bc, "LLM_BASE_URL", None),
+        "llm_max_tokens_env": getattr(bc, "LLM_MAX_TOKENS", None),
         "generator_model": args.model_id, "probe_layer": args.layer,
         "sha256": {"dataset": _sha256(args.dataset), "answers_file": _sha256(args.answers_file),
                    "probe": _sha256(args.probe)},
@@ -1193,6 +1197,9 @@ def main():
                     help="rows the probe was trained on (legacy probes), e.g. '0-99'; excluded from eval")
     gd.add_argument("--allow_train_overlap", action="store_true",
                     help="run even if train/test overlap cannot be ruled out (NOT paper-clean)")
+    gd.add_argument("--control_max_tokens", type=int, default=0, metavar="N",
+                    help="cap the control arm's answer length (e.g. 32). Use it with chatty local models, and "
+                         "NOT with reasoning models like gpt-oss, whose hidden reasoning counts against the cap.")
     gd.add_argument("--llm_only_control", action="store_true",
                     help="also grade the strong LLM answering closed-book with no blackboard (needs GROQ_API_KEY)")
 
@@ -1303,7 +1310,8 @@ def main():
     if args.llm_only_control and not incomplete:
         ctrl_answers = run_llm_only_control(records, bc.groq_caller, workers=args.workers, retries=args.retries,
                                             checkpoint=out_dir / "control_partial.jsonl",
-                                            model_tag=f"{args.llm_base_url}|{args.llm_model}")
+                                            model_tag=f"{args.llm_base_url}|{args.llm_model}|ctrl{args.control_max_tokens}",
+                                            max_tokens=args.control_max_tokens)
         ctrl_labels = [PROCESSING_ERROR if a.startswith("[CONTROL_ERROR") else grade(a, r["gold"], args.match, judge)
                        for r, a in zip(records, ctrl_answers)]
         d = paired_bootstrap(ctrl_labels, bb_labels, seed=args.seed)   # positive = blackboard better than control
