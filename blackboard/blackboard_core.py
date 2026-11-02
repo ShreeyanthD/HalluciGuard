@@ -98,6 +98,13 @@ def normalize_gemini_text(result: Any) -> str:
     return str(result).strip()
 
 
+def _as_bool(value) -> bool:
+    """JSON booleans from small models are sometimes strings; bool("false") is True in Python."""
+    if isinstance(value, str):
+        return value.strip().lower() in ("true", "yes", "y", "1")
+    return bool(value)
+
+
 def parse_json_object(raw_text: str) -> Dict[str, Any]:
     """
     Parse a JSON object from LLM output.
@@ -376,7 +383,7 @@ Return JSON only:
             raw = self.llm_caller(classify_prompt, temperature=0.0, response_mime_type="application/json")
             parsed = parse_json_object(raw)
             return {
-                "is_abstention": bool(parsed.get("is_abstention", False)),
+                "is_abstention": _as_bool(parsed.get("is_abstention", False)),
                 "method": "llm",
                 "explanation": str(parsed.get("explanation", "")).strip(),
             }

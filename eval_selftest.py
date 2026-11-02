@@ -289,6 +289,39 @@ def test_checkpoints_are_tied_to_the_model():
     print("ok  checkpoints refuse to mix models")
 
 
+def test_abstention_routing_guards():
+    import blackboard_core as bc0
+    assert bc0._as_bool("false") is False and bc0._as_bool("No") is False and bc0._as_bool(False) is False
+    assert bc0._as_bool("true") is True and bc0._as_bool(True) is True and bc0._as_bool("yes") is True
+    det = bc0.AbstentionDetector(llm_caller=lambda p, **k: '{"is_abstention": "false", "explanation": "x"}')
+    assert det.is_abstention("The capital is Paris.", allow_llm=True)["is_abstention"] is False   # was True before the fix
+    det = bc0.AbstentionDetector(llm_caller=lambda p, **k: '{"is_abstention": true}')
+    assert det.is_abstention("hmm hard to say", allow_llm=True)["is_abstention"] is True
+    # --no_llm_abstention switches the LLM fallback off
+    recs = ev.load_dataset(str(ROOT / "eval_data" / "sample_qa.jsonl"), "halueval")[:3]
+    for r in recs:
+        r["answer"] = "WRONG"; r["prob_hallucinated"] = 0.9
+    base = dict(threshold=0.7, default_score=1.0, chroma_dir=os.environ["CHROMA_PERSIST_DIRECTORY"], no_knowledge=True,
+                oracle_knowledge=False, enable_web=False, isolate_memory=False, match="lenient", llm_judge=False,
+                seed=0, workers=1, retries=0, fallback_on_error=True)
+    real_pr, real_flag = bc0.process_response, bc0.abstention_detector.use_llm_fallback
+    bc0.process_response = lambda prompt, response, confidence_score: {"status": "BLACKBOARD_PROCESSED", "final_response": "x", "verification_result": {}}
+    try:
+        bc0.abstention_detector.use_llm_fallback = True
+        ev.run_blackboard_stage(recs, Namespace(**base, no_llm_abstention=True))
+        assert bc0.abstention_detector.use_llm_fallback is False
+    finally:
+        bc0.process_response, bc0.abstention_detector.use_llm_fallback = real_pr, real_flag
+    # routing check: abstention-path items that the grader does not call abstentions are counted
+    recs2 = [{"id": i, "question": f"q{i}", "gold": ["a"], "answer": "wrong", "prob_hallucinated": .9} for i in range(4)]
+    rows2 = [{"status": "ABSTENTION", "verdict": None, "final_response": "wrong", "evidence_source": None, "error": None} for _ in range(4)]
+    A = Namespace(**base, no_llm_abstention=False)
+    rep = ev.build_report(recs2, rows2, [ev.HALLUCINATED] * 4, [ev.HALLUCINATED] * 4, A)
+    assert rep["routing_check"] == {"abstention_path_items": 4, "abstention_path_but_not_abstention_by_grader": 4, "verify_correct_path_items": 0}
+    assert "WARNING: many answers were mislabelled" in ev.format_summary(rep)
+    print("ok  abstention routing guards (string booleans, --no_llm_abstention, routing check)")
+
+
 def test_length_cap():
     import blackboard_core as bc0
     seen = []
@@ -538,6 +571,7 @@ if __name__ == "__main__":
     test_control_parallel_resume_and_checkpoint()
     test_rate_limit_handling()
     test_checkpoints_are_tied_to_the_model()
+    test_abstention_routing_guards()
     test_length_cap()
     test_per_role_models()
     test_provider_override()

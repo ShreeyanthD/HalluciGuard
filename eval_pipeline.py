@@ -748,7 +748,7 @@ def load_blackboard_module(args):
 
 
 STAGE2_KEYS = ("threshold", "default_score", "no_knowledge", "enable_web", "isolate_memory", "fallback_on_error",
-               "llm_model", "llm_base_url", "llm_roles")
+               "llm_model", "llm_base_url", "llm_roles", "no_llm_abstention")
 
 
 def save_stage2_rows(path: Path, records, rows, args) -> None:
@@ -780,6 +780,11 @@ def is_routed(r, args) -> bool:
 
 def run_blackboard_stage(records, args, partial_path=None):
     bc = load_blackboard_module(args)
+
+    if getattr(args, "no_llm_abstention", False):
+        # Abstentions are then detected by the phrase list only (the same rule the grader uses); answers that are
+        # not abstentions always go down the verify -> correct path instead of being re-judged by the LLM.
+        bc.abstention_detector.use_llm_fallback = False
 
     bc.HALLUCINATION_RISK_THRESHOLD = args.threshold
     if not args.enable_web:
@@ -1042,6 +1047,12 @@ def build_report(records, rows, base_labels, bb_labels, args, extra: Optional[Di
         "lost_to_over_abstention": transitions.get(f"{CORRECT} -> {ABSTAINED}", 0),
         "errors": by_status.get("ERROR", 0),
         "fallbacks_to_original_answer": by_status.get("ERROR_FALLBACK", 0),
+        "routing_check": {
+            "abstention_path_items": sum(1 for x in rows if x["status"] in ("ABSTENTION", "ABSTENTION_RESOLVED")),
+            "abstention_path_but_not_abstention_by_grader": sum(
+                1 for x, l in zip(rows, base_labels) if x["status"] in ("ABSTENTION", "ABSTENTION_RESOLVED") and l != ABSTAINED),
+            "verify_correct_path_items": by_status.get("BLACKBOARD_PROCESSED", 0),
+        },
         "wilson_ci95_hallucination_rate": {
             "without_blackboard": wilson_ci(base["hallucinated"], n),
             "with_blackboard": wilson_ci(bb["hallucinated"], n),
@@ -1104,6 +1115,13 @@ def format_summary(rep: Dict[str, Any]) -> str:
               f"Failure basis (errors count as failures): {rep['paired_fixed_vs_broken_failure']['fixed']}/"
               f"{rep['paired_fixed_vs_broken_failure']['broken']}, p = {rep['mcnemar_exact_p_failure']:.4f}.",
               f"Knowledge base: {rep['config']['knowledge_base']}."]
+    rc = rep["routing_check"]
+    lines.append(f"Routing check: {rc['abstention_path_items']} items went down the abstention path, "
+                 f"{rc['abstention_path_but_not_abstention_by_grader']} of them were NOT abstentions by the grader; "
+                 f"the verify -> correct path ran on only {rc['verify_correct_path_items']} items.")
+    if rc["abstention_path_but_not_abstention_by_grader"] > 0.1 * max(1, rc["abstention_path_items"]):
+        lines.append("WARNING: many answers were mislabelled as abstentions and skipped verification. "
+                     "Rerun stage 2 with --no_llm_abstention (new --out_dir) before drawing conclusions about the blackboard.")
     roles = rep["config"].get("llm_roles") or {}
     if roles:
         lines.append("LLM per role: " + "; ".join(f"{r.lower()}={c['model']}" for r, c in sorted(roles.items())) + ".")
@@ -1194,6 +1212,9 @@ def main():
                           "Fallbacks are counted and reported separately, plus a complete-case analysis on items where "
                           "the blackboard really ran. Without this flag such items are PROCESSING_ERROR failures.")
 
+    bbg.add_argument("--no_llm_abstention", action="store_true",
+                     help="detect abstentions by phrase list only (no LLM paraphrase check). Recommended with small "
+                          "models, which can mislabel substantive answers as abstentions.")
     bbg.add_argument("--max_items", type=int, default=0, metavar="N",
                      help="call the API for at most N items this run, then stop cleanly (for daily quotas). "
                           "Finished items are checkpointed; rerun the same command to continue.")
