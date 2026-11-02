@@ -557,17 +557,22 @@ def run_preflight(records, args) -> None:
     import copy
     bc = load_blackboard_module(args)
     usage = {"calls": 0, "tokens": 0}
-    comp = bc._groq_client.chat.completions
+    comp = bc._groq_client.chat.completions          # default client: also used for the rate-limit header probe
+    clients = list(bc.all_clients()) if hasattr(bc, "all_clients") else [bc._groq_client]
+    originals = [(c.chat.completions, c.chat.completions.create) for c in clients]
+
+    def make_counting(orig):
+        def counting(*a, **k):
+            r = orig(*a, **k)
+            usage["calls"] += 1
+            u = getattr(r, "usage", None)
+            usage["tokens"] += int(getattr(u, "total_tokens", 0) or 0)
+            return r
+        return counting
+
+    for c_comp, orig in originals:
+        c_comp.create = make_counting(orig)
     orig_create = comp.create
-
-    def counting(*a, **k):
-        r = orig_create(*a, **k)
-        usage["calls"] += 1
-        u = getattr(r, "usage", None)
-        usage["tokens"] += int(getattr(u, "total_tokens", 0) or 0)
-        return r
-
-    comp.create = counting
     try:
         todo = [r for r in records if is_routed(r, args)]
         n = min(max(1, args.preflight), len(todo))
@@ -629,7 +634,8 @@ def run_preflight(records, args) -> None:
               f"console.groq.com/settings/limits), find {bc.GROQ_MODEL} 'tokens per day', and compare it with the projected total above. "
               "If projected > 80% of it, split the run over days with --reuse_stage2 --retry_errors.")
     finally:
-        comp.create = orig_create
+        for c_comp, orig in originals:
+            c_comp.create = orig
 
 
 # ---------------------------------------------------------------------------
@@ -670,6 +676,7 @@ def write_manifest(out_dir: Path, args, records, bc, guard) -> None:
         "groq_model": getattr(bc, "GROQ_MODEL", None),
         "llm_base_url": getattr(bc, "LLM_BASE_URL", None),
         "llm_max_tokens_env": getattr(bc, "LLM_MAX_TOKENS", None),
+        "llm_roles": getattr(bc, "ROLE_CONFIG", None),
         "generator_model": args.model_id, "probe_layer": args.layer,
         "sha256": {"dataset": _sha256(args.dataset), "answers_file": _sha256(args.answers_file),
                    "probe": _sha256(args.probe)},
@@ -736,11 +743,12 @@ def load_blackboard_module(args):
     # checkpoints are tied to the model/provider that produced them, so they can never be mixed silently
     args.llm_model = getattr(bc, "GROQ_MODEL", None)
     args.llm_base_url = getattr(bc, "LLM_BASE_URL", None)
+    args.llm_roles = json.dumps(getattr(bc, "ROLE_CONFIG", {}), sort_keys=True)
     return bc
 
 
 STAGE2_KEYS = ("threshold", "default_score", "no_knowledge", "enable_web", "isolate_memory", "fallback_on_error",
-               "llm_model", "llm_base_url")
+               "llm_model", "llm_base_url", "llm_roles")
 
 
 def save_stage2_rows(path: Path, records, rows, args) -> None:
@@ -1015,6 +1023,7 @@ def build_report(records, rows, base_labels, bb_labels, args, extra: Optional[Di
             "n_questions": len(records),
             "threshold": args.threshold,
             "default_score_when_no_probe": args.default_score,
+            "llm_roles": json.loads(getattr(args, "llm_roles", None) or "{}"),
             "knowledge_base": "none (closed-book)" if args.no_knowledge else "ORACLE: gold knowledge from eval items (upper bound, not closed-book)",
             "web_search": bool(args.enable_web),
             "isolate_memory": bool(args.isolate_memory),
@@ -1095,6 +1104,9 @@ def format_summary(rep: Dict[str, Any]) -> str:
               f"Failure basis (errors count as failures): {rep['paired_fixed_vs_broken_failure']['fixed']}/"
               f"{rep['paired_fixed_vs_broken_failure']['broken']}, p = {rep['mcnemar_exact_p_failure']:.4f}.",
               f"Knowledge base: {rep['config']['knowledge_base']}."]
+    roles = rep["config"].get("llm_roles") or {}
+    if roles:
+        lines.append("LLM per role: " + "; ".join(f"{r.lower()}={c['model']}" for r, c in sorted(roles.items())) + ".")
     if rep.get("strict_grading"):
         sg = rep["strict_grading"]
         lines += ["", "Grading sensitivity (strict match: answer must equal gold after normalisation):",
@@ -1197,6 +1209,9 @@ def main():
                     help="rows the probe was trained on (legacy probes), e.g. '0-99'; excluded from eval")
     gd.add_argument("--allow_train_overlap", action="store_true",
                     help="run even if train/test overlap cannot be ruled out (NOT paper-clean)")
+    gd.add_argument("--control_with", default="", metavar="ROLE",
+                    help="which model the control arm uses: empty = the default model, or a role "
+                         "(verifier, corrector, extractor, abstention, answer) to use that role's model")
     gd.add_argument("--control_max_tokens", type=int, default=0, metavar="N",
                     help="cap the control arm's answer length (e.g. 32). Use it with chatty local models, and "
                          "NOT with reasoning models like gpt-oss, whose hidden reasoning counts against the cap.")
@@ -1308,9 +1323,18 @@ def main():
         print(f"[control] skipped: stage 2 is incomplete ({incomplete} items not run). Finish stage 2 first "
               "(rerun the same command); the control arm then runs and resumes automatically.")
     if args.llm_only_control and not incomplete:
-        ctrl_answers = run_llm_only_control(records, bc.groq_caller, workers=args.workers, retries=args.retries,
+        ctrl_fn, ctrl_id = bc.groq_caller, f"{args.llm_base_url}|{args.llm_model}"
+        if args.control_with:
+            role = args.control_with.upper()
+            if role not in getattr(bc, "ROLE_CALLERS", {}):
+                raise SystemExit(f"--control_with {args.control_with!r}: unknown role. Use one of "
+                                 f"{sorted(r.lower() for r in getattr(bc, 'ROLE_CALLERS', {}))}")
+            ctrl_fn = bc.ROLE_CALLERS[role]
+            ctrl_id = f"{bc.ROLE_CONFIG[role]['base_url']}|{bc.ROLE_CONFIG[role]['model']}"
+        print(f"[control] model: {ctrl_id}")
+        ctrl_answers = run_llm_only_control(records, ctrl_fn, workers=args.workers, retries=args.retries,
                                             checkpoint=out_dir / "control_partial.jsonl",
-                                            model_tag=f"{args.llm_base_url}|{args.llm_model}|ctrl{args.control_max_tokens}",
+                                            model_tag=f"{ctrl_id}|ctrl{args.control_max_tokens}",
                                             max_tokens=args.control_max_tokens)
         ctrl_labels = [PROCESSING_ERROR if a.startswith("[CONTROL_ERROR") else grade(a, r["gold"], args.match, judge)
                        for r, a in zip(records, ctrl_answers)]

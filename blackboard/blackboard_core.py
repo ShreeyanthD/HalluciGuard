@@ -1339,6 +1339,69 @@ def groq_caller(prompt, *, temperature=0.0, response_mime_type=None, max_tokens=
     raise RuntimeError(f"Groq failed after 3 attempts: {last}")
 
 
+# ---------------------------------------------------------------------------
+# Per-role models (heterogeneous agents). Each role can use its own model / endpoint / key:
+#   LLM_<ROLE>_MODEL, LLM_<ROLE>_BASE_URL, LLM_<ROLE>_API_KEY      ROLE in EXTRACTOR, VERIFIER,
+#   CORRECTOR, ABSTENTION, ANSWER. Anything not set falls back to the default model above,
+#   so with no LLM_<ROLE>_* variables every role uses the default and behaviour is unchanged.
+# ---------------------------------------------------------------------------
+_EXTRA_CLIENTS = {}     # (base_url, api_key) -> client, shared by roles that use the same endpoint
+_ROLE_CLIENTS = {}      # role -> client actually used by that role's caller
+ROLE_CONFIG = {}        # role -> {"base_url", "model"} (no keys), recorded in manifests / checkpoints
+ROLE_CALLERS = {}       # role -> caller
+
+
+def all_clients():
+    """Every distinct client in use (for token accounting in --preflight)."""
+    out = [_groq_client]
+    for c in _EXTRA_CLIENTS.values():
+        if c not in out:
+            out.append(c)
+    return out
+
+
+def _role_caller(role):
+    pre = f"LLM_{role}_"
+    base, key, model = os.getenv(pre + "BASE_URL"), os.getenv(pre + "API_KEY"), os.getenv(pre + "MODEL")
+    if not (base or key or model):
+        ROLE_CONFIG[role] = {"base_url": LLM_BASE_URL, "model": GROQ_MODEL}
+        ROLE_CALLERS[role] = groq_caller
+        return groq_caller
+    base, key, model = base or LLM_BASE_URL, key or GROQ_API_KEY, model or GROQ_MODEL
+    if (base, key) == (LLM_BASE_URL, GROQ_API_KEY):
+        client = _groq_client
+    else:
+        client = _EXTRA_CLIENTS.get((base, key))
+        if client is None:
+            client = OpenAI(base_url=base, api_key=key, **({"timeout": _LLM_TIMEOUT} if _LLM_TIMEOUT else {}))
+            _EXTRA_CLIENTS[(base, key)] = client
+    _ROLE_CLIENTS[role] = client
+
+    def caller(prompt, *, temperature=0.0, response_mime_type=None, max_tokens=None, **kw):
+        last = None
+        limit = max_tokens or LLM_MAX_TOKENS
+        for attempt in range(3):
+            try:
+                r = client.chat.completions.create(
+                    model=model,
+                    temperature=temperature,
+                    messages=[{"role": "user", "content": prompt}],
+                    **({"max_tokens": limit} if limit else {}),
+                )
+                text = (r.choices[0].message.content or "").strip()
+                if text:
+                    return text
+                raise ValueError("empty response")
+            except Exception as e:
+                last = e
+                time.sleep(2 * (attempt + 1))
+        raise RuntimeError(f"{role.lower()} LLM ({model}) failed after 3 attempts: {last}")
+
+    ROLE_CONFIG[role] = {"base_url": base, "model": model}
+    ROLE_CALLERS[role] = caller
+    return caller
+
+
 print("LLM caller ready:", GROQ_MODEL, "@", LLM_BASE_URL)
 
 
@@ -1359,12 +1422,15 @@ retrieval_agent = RetrievalAgent(
     top_k=RETRIEVAL_TOP_K,
 )
 
-verifier_agent = VerifierAgent(llm_caller=groq_caller)
-correction_agent = CorrectionAgent(llm_caller=groq_caller)
-claim_extractor = ClaimExtractor(llm_caller=groq_caller)
-abstention_detector = AbstentionDetector(llm_caller=groq_caller)
+verifier_agent = VerifierAgent(llm_caller=_role_caller("VERIFIER"))
+correction_agent = CorrectionAgent(llm_caller=_role_caller("CORRECTOR"))
+claim_extractor = ClaimExtractor(llm_caller=_role_caller("EXTRACTOR"))
+abstention_detector = AbstentionDetector(llm_caller=_role_caller("ABSTENTION"))
 web_search_agent = WebSearchAgent()
-answer_agent = AnswerAgent(llm_caller=groq_caller)
+answer_agent = AnswerAgent(llm_caller=_role_caller("ANSWER"))
+
+if any(v != {"base_url": LLM_BASE_URL, "model": GROQ_MODEL} for v in ROLE_CONFIG.values()):
+    print("LLM per role:", "; ".join(f"{r.lower()}={c['model']}@{c['base_url']}" for r, c in sorted(ROLE_CONFIG.items())))
 
 if web_search_agent.enabled:
     print("WebSearchAgent ready (Tavily) — used as a fallback when local retrieval is INSUFFICIENT.")

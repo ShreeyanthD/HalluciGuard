@@ -282,6 +282,10 @@ def test_checkpoints_are_tied_to_the_model():
         ev.load_stage2_rows(d / "bb.jsonl", recs, Namespace(**{**vars(a), "llm_model": "modelB"})); raise AssertionError("must refuse")
     except SystemExit:
         pass
+    try:
+        ev.load_stage2_rows(d / "bb.jsonl", recs, Namespace(**{**vars(a), "llm_roles": '{"VERIFIER": "x"}'})); raise AssertionError("must refuse")
+    except SystemExit:
+        pass
     print("ok  checkpoints refuse to mix models")
 
 
@@ -307,6 +311,44 @@ def test_length_cap():
     finally:
         bc0._groq_client = real
     print("ok  optional length cap (max_tokens)")
+
+
+def test_per_role_models():
+    import subprocess, tempfile, json as _j
+    code = r"""
+import sys, json; sys.path.insert(0, 'blackboard')
+import blackboard_core as b
+seen = []
+class M: content = 'ok'
+class C: message = M()
+class R: choices = [C()]
+def spy(tag):
+    def create(**k): seen.append((tag, k['model'])); return R()
+    return create
+b._groq_client.chat.completions.create = spy('default')
+for role, cl in b._ROLE_CLIENTS.items():
+    cl.chat.completions.create = spy(role)
+b.verifier_agent.llm_caller('p'); b.correction_agent.llm_caller('p'); b.claim_extractor.llm_caller('p')
+print('RESULT', json.dumps({'cfg': b.ROLE_CONFIG, 'seen': seen, 'n_clients': len(b.all_clients()),
+      'same_default': b.correction_agent.llm_caller is b.groq_caller}))
+"""
+    def run(extra):
+        env = {k: v for k, v in os.environ.items() if not k.startswith("LLM_")}
+        env.update({"CHROMA_PERSIST_DIRECTORY": tempfile.mkdtemp(), "GROQ_API_KEY": "g", "GROQ_MODEL": "mistral", **extra})
+        out = subprocess.run([sys.executable, "-c", code], cwd=str(ROOT), env=env, capture_output=True, text=True, timeout=120)
+        line = [l for l in out.stdout.splitlines() if l.startswith("RESULT")]
+        assert line, out.stderr[-600:]
+        return _j.loads(line[0][7:])
+    r = run({})                                                   # nothing set: every role = default, unchanged
+    assert all(c["model"] == "mistral" for c in r["cfg"].values()) and r["n_clients"] == 1 and r["same_default"]
+    assert [s[0] for s in r["seen"]] == ["default"] * 3
+    r = run({"LLM_VERIFIER_MODEL": "llama", "LLM_VERIFIER_BASE_URL": "http://localhost:8001/v1", "LLM_VERIFIER_API_KEY": "k"})
+    assert r["cfg"]["VERIFIER"] == {"base_url": "http://localhost:8001/v1", "model": "llama"}
+    assert r["cfg"]["CORRECTOR"]["model"] == "mistral" and r["same_default"] and r["n_clients"] == 2
+    assert r["seen"] == [["VERIFIER", "llama"], ["default", "mistral"], ["default", "mistral"]]
+    r = run({"LLM_CORRECTOR_MODEL": "llama"})                      # same endpoint, different model: no extra client
+    assert r["cfg"]["CORRECTOR"]["model"] == "llama" and r["n_clients"] == 1
+    print("ok  per-role models (mixed LLMs), defaults unchanged")
 
 
 def test_provider_override():
@@ -497,6 +539,7 @@ if __name__ == "__main__":
     test_rate_limit_handling()
     test_checkpoints_are_tied_to_the_model()
     test_length_cap()
+    test_per_role_models()
     test_provider_override()
     test_preflight()
     test_partial_checkpoint_and_max_items()
