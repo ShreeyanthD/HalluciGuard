@@ -44,6 +44,9 @@ Dataset formats (--format auto detects by file contents)
   generic  : JSON/JSONL/CSV with question + answer (or gold / right_answer;
              a list of aliases is fine) + optional knowledge/context.
              Override column names with --q_field / --a_field / --k_field.
+  popqa / triviaqa : files from prepare_eval_data.py ("answers" alias list, "group"), or raw
+             PopQA (possible_answers) / TriviaQA (answer.aliases) exports. Closed-book only.
+             A "group" field (PopQA: head/torso/tail) gives a per-group breakdown in the report.
 """
 
 import argparse
@@ -103,6 +106,28 @@ def _first(row: Dict[str, Any], names: List[str]) -> Any:
         if n and n in row and row[n] not in (None, ""):
             return row[n]
     return None
+
+
+def _gold_list(gold: Any) -> List[Any]:
+    """Accept a string, a list, a JSON-encoded list (PopQA possible_answers) or a TriviaQA
+    answer dict ({value, aliases, normalized_aliases}); return a flat list of alias strings."""
+    if isinstance(gold, str) and gold.strip().startswith("["):
+        try:
+            gold = json.loads(gold)
+        except json.JSONDecodeError:
+            pass
+    if isinstance(gold, dict):
+        gold = [gold.get("value", "")] + list(gold.get("aliases") or []) + list(gold.get("normalized_aliases") or [])
+    golds = gold if isinstance(gold, list) else [gold]
+    out, seen = [], set()
+    for g in golds:
+        g = str(g).strip()
+        k = re.sub(r"\s+", " ", re.sub(r"[^\w\s]", " ", g.lower())).strip()
+        if len(k) < 2 or k in seen:   # empty / 1-char aliases cause false "correct" matches
+            continue
+        seen.add(k)
+        out.append(g)
+    return out
 
 
 def parse_indices(spec: Optional[str]) -> Optional[List[int]]:
@@ -175,7 +200,7 @@ def load_dataset(path: str, fmt: str = "auto", q_field=None, a_field=None, k_fie
     for i in order:
         row = rows[i]
         q = _first(row, [q_field, "question", "prompt", "query"])
-        gold = _first(row, [a_field, "right_answer", "gold", "answer", "answers", "target"])
+        gold = _first(row, [a_field, "right_answer", "gold", "answers", "possible_answers", "answer", "target"])
         know = _first(row, [k_field, "knowledge", "context", "evidence"])
         if fmt == "halueval":
             q = row.get("question")
@@ -190,17 +215,23 @@ def load_dataset(path: str, fmt: str = "auto", q_field=None, a_field=None, k_fie
             LOAD_STATS["duplicates_dropped"] += 1
             continue
         seen_q.add(norm_q(q))
-        golds = gold if isinstance(gold, list) else [gold]
+        golds = _gold_list(gold)
+        if not golds:
+            continue
         rec = {
             "id": orig[i],
             "question": str(q).strip(),
-            "gold": [str(g).strip() for g in golds if str(g).strip()],
+            "gold": golds,
             "knowledge": str(know).strip() if know else "",
         }
+        if row.get("group"):
+            rec["group"] = str(row["group"])
+        if row.get("s_pop") not in (None, ""):
+            rec["s_pop"] = float(row["s_pop"])
         if row.get("hallucinated_answer"):
             rec["hallucinated_answer"] = str(row["hallucinated_answer"]).strip()
         # If the file already holds model answers (stage-1 output), keep them.
-        if row.get("answer") is not None and "gold" in row:
+        if row.get("answer") is not None and "gold" in row and not isinstance(row["answer"], dict):
             rec["answer"] = str(row["answer"])
         if row.get("prob_hallucinated") is not None:
             rec["prob_hallucinated"] = float(row["prob_hallucinated"])
@@ -975,6 +1006,25 @@ def arm_metrics(labels: List[str]) -> Dict[str, Any]:
     }
 
 
+def group_breakdown(records, base_labels, bb_labels) -> Optional[Dict[str, Any]]:
+    """Per-group arm metrics (e.g. PopQA head/torso/tail), plus probe AUROC per group."""
+    groups = sorted({r.get("group") for r in records if r.get("group")})
+    if len(groups) < 2:
+        return None
+    out = {}
+    for g in groups:
+        idx = [i for i, r in enumerate(records) if r.get("group") == g]
+        sub = [records[i] for i in idx]
+        bl = [base_labels[i] for i in idx]
+        wl = [bb_labels[i] for i in idx]
+        entry = {"without_blackboard": arm_metrics(bl), "with_blackboard": arm_metrics(wl)}
+        pa = probe_auroc_report(sub, bl, iters=500)
+        if pa:
+            entry["probe_auroc"] = {"auroc": pa["auroc"], "n": pa["n"], "n_wrong": pa["n_wrong"]}
+        out[g] = entry
+    return out
+
+
 def paired_bootstrap(base: List[str], bb: List[str], iters: int = 2000, seed: int = 0) -> Dict[str, float]:
     if len(base) != len(bb):
         raise ValueError("Paired bootstrap requires equal-length outcome lists.")
@@ -1129,6 +1179,16 @@ def format_summary(rep: Dict[str, Any]) -> str:
         sg = rep["strict_grading"]
         lines += ["", "Grading sensitivity (strict match: answer must equal gold after normalisation):",
                   f"- hallucination rate without / with blackboard: {pct(sg['without_blackboard']['hallucination_rate'])} / {pct(sg['with_blackboard']['hallucination_rate'])}"]
+    if rep.get("by_group"):
+        lines += ["", "By group (without -> with blackboard):",
+                  "| group | n | accuracy | hallucination | abstention | probe AUROC |", "|---|---|---|---|---|---|"]
+        for g, e in rep["by_group"].items():
+            gb_, gw_ = e["without_blackboard"], e["with_blackboard"]
+            au = e.get("probe_auroc", {}).get("auroc")
+            lines.append(f"| {g} | {gb_['n']} | {pct(gb_['accuracy'])} -> {pct(gw_['accuracy'])} | "
+                         f"{pct(gb_['hallucination_rate'])} -> {pct(gw_['hallucination_rate'])} | "
+                         f"{pct(gb_['abstention_rate'])} -> {pct(gw_['abstention_rate'])} | "
+                         f"{'n/a' if au is None else f'{au:.3f}'} |")
     if rep.get("probe_detection"):
         pd_ = rep["probe_detection"]
         lines += ["", f"Probe detection on held-out eval answers: AUROC {pd_['auroc']:.3f} "
@@ -1171,7 +1231,7 @@ def main():
     src = ap.add_argument_group("input")
     src.add_argument("--dataset", help="QA file (HaluEval qa_data.json, or generic json/jsonl/csv)")
     src.add_argument("--answers_file", help="Stage-1 output (generations.jsonl) — skips generation")
-    src.add_argument("--format", default="auto", choices=["auto", "halueval", "generic"])
+    src.add_argument("--format", default="auto", choices=["auto", "halueval", "generic", "popqa", "triviaqa"])
     src.add_argument("--q_field"); src.add_argument("--a_field"); src.add_argument("--k_field")
     src.add_argument("--limit", type=int, default=None, help="how many questions to use")
     src.add_argument("--start", type=int, default=0, help="first row to use (0-based), with --limit")
@@ -1338,6 +1398,9 @@ def main():
         extra["complete_case"] = {"n": len(cc), "excluded": len(rows) - len(cc),
                                   "without_blackboard": arm_metrics([base_labels[i] for i in cc]),
                                   "with_blackboard": arm_metrics([bb_labels[i] for i in cc])}
+    gb = group_breakdown(records, base_labels, bb_labels)
+    if gb:
+        extra["by_group"] = gb
     ctrl_answers = ctrl_labels = None
     incomplete = sum(1 for x in rows if x["error"] and str(x["error"]).startswith(("MAX_ITEMS_REACHED", "QUOTA_EXHAUSTED")))
     if args.llm_only_control and incomplete:
@@ -1382,11 +1445,11 @@ def main():
     with open(out_dir / "per_item.csv", "w", newline="", encoding="utf-8") as f:
         w = csv.writer(f)
         w.writerow(["row_index", "question", "gold", "halueval_hallucinated_answer", "prob_hallucinated", "raw_answer", "raw_label",
-                    "status", "verdict", "evidence_source", "final_response", "final_label", "error"])
+                    "status", "verdict", "evidence_source", "final_response", "final_label", "error", "group"])
         for r, x, bl, wl in zip(records, rows, base_labels, bb_labels):
             w.writerow([r["id"], r["question"], " | ".join(r["gold"]), r.get("hallucinated_answer", ""), r.get("prob_hallucinated", ""),
                         r["answer"], bl, x["status"], x["verdict"] or "", x["evidence_source"] or "",
-                        x["final_response"], wl, x["error"] or ""])
+                        x["final_response"], wl, x["error"] or "", r.get("group", "")])
     with open(out_dir / "metrics.json", "w") as f:
         json.dump(report, f, indent=2)
     with open(out_dir / "summary.md", "w") as f:
