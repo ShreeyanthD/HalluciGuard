@@ -52,6 +52,34 @@ blackboard_core.process_response(prompt, response, prob_hallucinated) [blackboar
 final_response  (+ full trace: extracted claim, verdict, evidence, abstention_detection, etc.)
 ```
 
+## Mitigation test with domain knowledge (KB coverage sweep)
+
+A closed-book run (empty ChromaDB, the default) can only turn hallucinations into abstentions: the Verifier
+never has evidence, so it answers `INSUFFICIENT` and the Correction Agent abstains. To test whether the
+Blackboard actually *corrects* answers, give it a knowledge base that contains the answer.
+
+`eval_pipeline.py --kb_coverage F` puts the supporting passage (the `knowledge` field, e.g. HaluEval-QA) of a
+fraction `F` of the eval questions into **one shared** ChromaDB collection. Retrieval therefore still has to find
+the right passage among all the others, which `--oracle_knowledge` (a 1:1 gold passage per question) does not
+test. Which items are covered is decided by a seeded hash of the item id, so the sets are nested across coverage
+levels (the items covered at 0.25 are also covered at 0.5) and do not change between runs or `--retry_errors`.
+The report splits the results into items whose passage is / is not in the KB. `--kb_file` adds a real domain
+corpus (`.txt` with blank-line separated passages, or json/jsonl/csv with a `text`/`knowledge`/`passage` field).
+
+```bash
+# generate once (GPU), then run the Blackboard at coverage 0 / 0.5 / 1 on the same answers
+python kb_coverage_sweep.py --dataset HaluEval-main/data/qa_data.json --probe probe/probe.joblib \
+    --stage1_args "--limit 300 --shuffle --seed 0" --out_root eval_runs/kb_sweep
+
+# or reuse earlier answers, no GPU
+python kb_coverage_sweep.py --answers_file eval_runs/pilot/generations.jsonl --out_root eval_runs/kb_sweep
+```
+
+Output: `eval_runs/kb_sweep/sweep_summary.md` (+ `.json`), and a normal `cov_<F>/` report per level. Expected
+pattern if the mitigation works: on covered items hallucinations become correct answers, on uncovered items they
+become abstentions. Stage-2 runs use `--isolate_memory` by default so an episodic-memory hit never replaces
+retrieval (`--share_memory` to turn that off).
+
 ### Three behaviors worth calling out explicitly
 
 1. **Insufficient evidence → an honest abstention, not a bracketed note.**

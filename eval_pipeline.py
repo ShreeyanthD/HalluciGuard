@@ -39,6 +39,17 @@ Usage
   # no probe / no GPU: send EVERY answer through the blackboard
   python eval_pipeline.py --answers_file my_answers.jsonl --threshold 0
 
+Knowledge-base conditions for the mitigation test (default is closed-book = empty KB)
+  --oracle_knowledge        every item's own supporting passage is in the KB (upper bound)
+  --kb_coverage F           DOMAIN-KB test: only a fraction F (0..1) of the items have their supporting
+                            passage in the KB; all passages sit in ONE shared collection, so retrieval
+                            also has to pick the right passage out of the others. The report splits the
+                            results into items whose passage is / is not in the KB. Needs a dataset with a
+                            `knowledge` field (HaluEval-QA has one; otherwise use --k_field).
+  --kb_file PATH            extra domain corpus (.jsonl/.json with a text/knowledge/passage field, or .txt
+                            with blank-line separated passages) added to the KB as distractors / real docs.
+  Sweep helper: kb_coverage_sweep.py runs coverage 0 / 0.5 / 1 on the SAME generations and tabulates them.
+
 Dataset formats (--format auto detects by file contents)
   halueval : JSON/JSONL with question, right_answer, knowledge
   generic  : JSON/JSONL/CSV with question + answer (or gold / right_answer;
@@ -778,8 +789,99 @@ def load_blackboard_module(args):
     return bc
 
 
+# ---------------------------------------------------------------------------
+# Domain-knowledge (KB coverage) condition
+# ---------------------------------------------------------------------------
+
+# Every eval record, set by main(). A --retry_errors run only re-runs a subset, but the KB must still be built
+# from the whole eval set, otherwise the retried items would be verified against a different knowledge base.
+KB_POOL: List[Dict[str, Any]] = []
+
+
+def kb_effective_coverage(args) -> Optional[float]:
+    """Fraction of items whose own gold passage goes into the KB. None = no gold passages are loaded.
+    Plain --oracle_knowledge is the special case coverage = 1.0."""
+    if getattr(args, "no_knowledge", False):
+        return None
+    cov = getattr(args, "kb_coverage", None)
+    if cov is None and getattr(args, "oracle_knowledge", False):
+        cov = 1.0
+    return cov
+
+
+def kb_is_covered(rec_id, coverage: float, seed: int) -> bool:
+    """Decided per item id from a hash, so it does not depend on which subset of items is being run, and
+    the sets are nested: everything covered at 0.25 is also covered at 0.5 and at 1.0."""
+    if coverage >= 1.0:
+        return True
+    if coverage <= 0.0:
+        return False
+    h = int(hashlib.sha256(f"{seed}:{rec_id}".encode()).hexdigest()[:8], 16) / 16 ** 8
+    return h < coverage
+
+
+def tag_kb_coverage(records, args) -> Optional[float]:
+    """Set rec['kb_covered'] (True / False) on every record, or remove it when no gold passages are loaded."""
+    cov = kb_effective_coverage(args)
+    seed = getattr(args, "kb_seed", None)
+    seed = getattr(args, "seed", 0) if seed is None else seed
+    for r in records:
+        if cov is None:
+            r.pop("kb_covered", None)
+        else:
+            r["kb_covered"] = bool(r.get("knowledge")) and kb_is_covered(r["id"], cov, seed)
+    return cov
+
+
+def read_kb_file(path: str) -> List[str]:
+    """Passages from a domain corpus: .txt (blank-line separated) or json/jsonl/csv with a text-like field."""
+    p = Path(path)
+    if p.suffix.lower() == ".txt":
+        parts = re.split(r"\n\s*\n", p.read_text(encoding="utf-8"))
+        return [x.strip() for x in parts if x.strip()]
+    out = []
+    for row in _read_rows(path):
+        t = row if isinstance(row, str) else _first(row, ["text", "knowledge", "passage", "content", "context", "evidence"])
+        if t and str(t).strip():
+            out.append(str(t).strip())
+    return out
+
+
+def describe_kb(records, args) -> str:
+    if getattr(args, "no_knowledge", False):
+        return "none (closed-book)"
+    cov = kb_effective_coverage(args)
+    kf = getattr(args, "kb_file", None)
+    if cov is not None and getattr(args, "kb_coverage", None) is None and not kf:
+        return "ORACLE: gold knowledge from eval items (upper bound, not closed-book)"
+    parts = []
+    if cov is not None:
+        n_cov = sum(1 for r in records if r.get("kb_covered"))
+        parts.append(f"gold supporting passages for {n_cov}/{len(records)} eval items (coverage setting {cov:g}), "
+                     "all pooled in one shared collection")
+    if kf:
+        parts.append(f"passages from --kb_file {Path(kf).name}")
+    return "DOMAIN KB: " + " + ".join(parts)
+
+
+def kb_breakdown(records, base_labels, bb_labels) -> Optional[Dict[str, Any]]:
+    """Arm metrics for items whose gold passage is in the KB vs not. Only when both kinds exist."""
+    flags = [r.get("kb_covered") for r in records]
+    if not any(f is True for f in flags) or not any(f is False for f in flags):
+        return None
+    out = {}
+    for name, want in (("covered", True), ("not_covered", False)):
+        idx = [i for i, f in enumerate(flags) if f is want]
+        out[name] = {"n": len(idx),
+                     "without_blackboard": arm_metrics([base_labels[i] for i in idx]),
+                     "with_blackboard": arm_metrics([bb_labels[i] for i in idx])}
+    return out
+
+
 STAGE2_KEYS = ("threshold", "default_score", "no_knowledge", "enable_web", "isolate_memory", "fallback_on_error",
-               "llm_model", "llm_base_url", "llm_roles", "no_llm_abstention")
+               "llm_model", "llm_base_url", "llm_roles", "no_llm_abstention",
+               "kb_coverage", "kb_seed", "kb_file", "kb_file_sha256")
+_STAGE2_KEY_DEFAULTS = {"kb_coverage": None, "kb_seed": None, "kb_file": None, "kb_file_sha256": None}
 
 
 def save_stage2_rows(path: Path, records, rows, args) -> None:
@@ -793,7 +895,7 @@ def save_stage2_rows(path: Path, records, rows, args) -> None:
 
 def load_stage2_rows(path: Path, records, args):
     lines = [json.loads(l) for l in open(path, encoding="utf-8") if l.strip()]
-    meta, saved = lines[0]["_meta"], lines[1:]
+    meta, saved = {**_STAGE2_KEY_DEFAULTS, **lines[0]["_meta"]}, lines[1:]
     cur = {k: getattr(args, k, None) for k in STAGE2_KEYS}
     if meta != cur:
         raise SystemExit(f"--reuse_stage2: saved rows were made with different settings.\n  saved:   {meta}\n  current: {cur}")
@@ -824,19 +926,36 @@ def run_blackboard_stage(records, args, partial_path=None):
     bc.reset_memory_collection()
     bc.reset_knowledge_collection()
     if not args.no_knowledge:
-        seen, docs, ids = set(), [], []
-        for r in records:
-            k = r.get("knowledge", "")
-            if k and k not in seen:
-                seen.add(k)
-                docs.append(k)
+        pool = KB_POOL or records
+        cov = tag_kb_coverage(pool, args)
+        seen, docs, ids, metas = set(), [], [], []
+
+        def _add(text, source):
+            if text and text not in seen:
+                seen.add(text)
+                docs.append(text)
                 ids.append(f"kb-{len(ids)}")
-        if docs:
-            for s in range(0, len(docs), 200):
-                bc.add_knowledge_documents(docs[s:s + 200], ids=ids[s:s + 200],
-                                           metadatas=[{"source": "eval_dataset"}] * len(docs[s:s + 200]))
-        print(f"[stage 2] knowledge base: {len(docs)} ORACLE documents loaded (gold knowledge from the eval items). "
-              "Report this as an upper bound / oracle-retrieval result, NOT as a closed-book result.")
+                metas.append({"source": source})
+
+        if cov is not None:
+            for r in pool:
+                if r.get("kb_covered"):
+                    _add(r.get("knowledge", ""), "eval_dataset")
+        n_gold = len(docs)
+        if getattr(args, "kb_file", None):
+            for t in read_kb_file(args.kb_file):
+                _add(t, "kb_file")
+        for s0 in range(0, len(docs), 200):
+            bc.add_knowledge_documents(docs[s0:s0 + 200], ids=ids[s0:s0 + 200], metadatas=metas[s0:s0 + 200])
+        if cov is not None and getattr(args, "kb_coverage", None) is None and not getattr(args, "kb_file", None):
+            print(f"[stage 2] knowledge base: {len(docs)} ORACLE documents loaded (gold knowledge from the eval items). "
+                  "Report this as an upper bound / oracle-retrieval result, NOT as a closed-book result.")
+        else:
+            n_cov = sum(1 for r in pool if r.get("kb_covered"))
+            print(f"[stage 2] knowledge base (DOMAIN KB): {len(docs)} documents = {n_gold} gold passages "
+                  f"({n_cov}/{len(pool)} items covered, coverage setting {cov if cov is not None else 'n/a'}) "
+                  f"+ {len(docs) - n_gold} from --kb_file. Items whose passage is not in the KB can only be "
+                  "answered from other passages, or abstained.")
     else:
         print("[stage 2] knowledge base: EMPTY (closed-book; default)")
 
@@ -1079,7 +1198,9 @@ def build_report(records, rows, base_labels, bb_labels, args, extra: Optional[Di
             "threshold": args.threshold,
             "default_score_when_no_probe": args.default_score,
             "llm_roles": json.loads(getattr(args, "llm_roles", None) or "{}"),
-            "knowledge_base": "none (closed-book)" if args.no_knowledge else "ORACLE: gold knowledge from eval items (upper bound, not closed-book)",
+            "knowledge_base": describe_kb(records, args),
+            "kb_coverage": kb_effective_coverage(args),
+            "kb_file": getattr(args, "kb_file", None),
             "web_search": bool(args.enable_web),
             "isolate_memory": bool(args.isolate_memory),
             "match_mode": args.match,
@@ -1179,6 +1300,15 @@ def format_summary(rep: Dict[str, Any]) -> str:
         sg = rep["strict_grading"]
         lines += ["", "Grading sensitivity (strict match: answer must equal gold after normalisation):",
                   f"- hallucination rate without / with blackboard: {pct(sg['without_blackboard']['hallucination_rate'])} / {pct(sg['with_blackboard']['hallucination_rate'])}"]
+    if rep.get("by_kb_coverage"):
+        lines += ["", "By knowledge-base coverage (without -> with blackboard):",
+                  "| items | n | accuracy | hallucination | abstention |", "|---|---|---|---|---|"]
+        for key, label in (("covered", "gold passage in KB"), ("not_covered", "gold passage NOT in KB")):
+            e = rep["by_kb_coverage"][key]
+            kb_, kw_ = e["without_blackboard"], e["with_blackboard"]
+            lines.append(f"| {label} | {e['n']} | {pct(kb_['accuracy'])} -> {pct(kw_['accuracy'])} | "
+                         f"{pct(kb_['hallucination_rate'])} -> {pct(kw_['hallucination_rate'])} | "
+                         f"{pct(kb_['abstention_rate'])} -> {pct(kw_['abstention_rate'])} |")
     if rep.get("by_group"):
         lines += ["", "By group (without -> with blackboard):",
                   "| group | n | accuracy | hallucination | abstention | probe AUROC |", "|---|---|---|---|---|---|"]
@@ -1258,6 +1388,14 @@ def main():
     bbg.add_argument("--oracle_knowledge", action="store_true",
                      help="load the dataset's gold 'knowledge' into the KB. ORACLE setting: leaks the answer "
                           "source, report only as an upper bound. Default (off) is closed-book.")
+    bbg.add_argument("--kb_coverage", type=float, default=None, metavar="F",
+                     help="DOMAIN-KB test: put the supporting passage of only a fraction F (0..1) of the eval items "
+                          "into one shared KB (chosen by a seeded hash of the item id; nested across F). Results are "
+                          "split into items whose passage is / is not in the KB. Implies a non-empty KB setting.")
+    bbg.add_argument("--kb_seed", type=int, default=None, help="seed for which items are covered (default: --seed)")
+    bbg.add_argument("--kb_file", default=None, metavar="PATH",
+                     help="extra domain corpus for the KB: .jsonl/.json/.csv with a text/knowledge/passage field, or "
+                          ".txt with blank-line separated passages")
     bbg.add_argument("--no_knowledge", action="store_true", help="deprecated: closed-book is now the default")
     bbg.add_argument("--enable_web", action="store_true", help="allow Tavily web-search fallback")
     bbg.add_argument("--isolate_memory", action="store_true",
@@ -1317,7 +1455,14 @@ def main():
         spec = (spec + "," if spec else "") + ",".join(Path(args.indices_file).read_text().split())
     indices = parse_indices(spec)
 
-    args.no_knowledge = not args.oracle_knowledge
+    if args.kb_coverage is not None and not 0.0 <= args.kb_coverage <= 1.0:
+        ap.error("--kb_coverage must be between 0 and 1")
+    if args.kb_file and not Path(args.kb_file).exists():
+        ap.error(f"--kb_file not found: {args.kb_file}")
+    args.no_knowledge = not (args.oracle_knowledge or args.kb_coverage is not None or bool(args.kb_file))
+    # only meaningful (and only recorded in the stage-2 checkpoint) when a fractional coverage is used
+    args.kb_seed = (args.seed if args.kb_seed is None else args.kb_seed) if args.kb_coverage is not None else None
+    args.kb_file_sha256 = _sha256(args.kb_file)
     ex = probe_exclusions(args)
 
     if args.answers_file:
@@ -1348,6 +1493,11 @@ def main():
     print(f"Excluded {LOAD_STATS.get('excluded_probe_train', 0)} probe-training rows; "
           f"dropped {LOAD_STATS.get('duplicates_dropped', 0)} duplicate questions.")
     print("Using dataset rows:", [r["id"] for r in records])
+    KB_POOL[:] = records
+    if tag_kb_coverage(records, args) is not None and args.kb_coverage is not None \
+            and not any(r.get("knowledge") for r in records):
+        ap.error("--kb_coverage needs gold passages: the dataset has no `knowledge` field (use --k_field, or a "
+                 "HaluEval-QA style file).")
 
     # ---- blackboard ------------------------------------------------------
     stage2_path = out_dir / "bb_rows.jsonl"
@@ -1401,6 +1551,9 @@ def main():
     gb = group_breakdown(records, base_labels, bb_labels)
     if gb:
         extra["by_group"] = gb
+    kbb = kb_breakdown(records, base_labels, bb_labels)
+    if kbb:
+        extra["by_kb_coverage"] = kbb
     ctrl_answers = ctrl_labels = None
     incomplete = sum(1 for x in rows if x["error"] and str(x["error"]).startswith(("MAX_ITEMS_REACHED", "QUOTA_EXHAUSTED")))
     if args.llm_only_control and incomplete:
@@ -1445,11 +1598,12 @@ def main():
     with open(out_dir / "per_item.csv", "w", newline="", encoding="utf-8") as f:
         w = csv.writer(f)
         w.writerow(["row_index", "question", "gold", "halueval_hallucinated_answer", "prob_hallucinated", "raw_answer", "raw_label",
-                    "status", "verdict", "evidence_source", "final_response", "final_label", "error", "group"])
+                    "status", "verdict", "evidence_source", "final_response", "final_label", "error", "group", "kb_covered"])
         for r, x, bl, wl in zip(records, rows, base_labels, bb_labels):
             w.writerow([r["id"], r["question"], " | ".join(r["gold"]), r.get("hallucinated_answer", ""), r.get("prob_hallucinated", ""),
                         r["answer"], bl, x["status"], x["verdict"] or "", x["evidence_source"] or "",
-                        x["final_response"], wl, x["error"] or "", r.get("group", "")])
+                        x["final_response"], wl, x["error"] or "", r.get("group", ""),
+                        "" if r.get("kb_covered") is None else int(bool(r["kb_covered"]))])
     with open(out_dir / "metrics.json", "w") as f:
         json.dump(report, f, indent=2)
     with open(out_dir / "summary.md", "w") as f:

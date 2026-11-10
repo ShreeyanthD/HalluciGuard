@@ -562,11 +562,103 @@ def test_retry_and_fallback():
     print("ok  retries, fallback-on-error, probe precision/recall")
 
 
+def test_kb_coverage():
+    """Domain-KB condition: coverage selection, KB contents, the covered / not-covered split, old-checkpoint compat."""
+    # selection is deterministic, independent of the subset being run, and nested across coverage levels
+    ids = list(range(400))
+    c25 = {i for i in ids if ev.kb_is_covered(i, 0.25, 0)}
+    c50 = {i for i in ids if ev.kb_is_covered(i, 0.50, 0)}
+    assert c25 <= c50 and c50 == {i for i in ids if ev.kb_is_covered(i, 0.50, 0)}
+    assert 0.40 < len(c50) / 400 < 0.60 and 0.15 < len(c25) / 400 < 0.35
+    assert all(ev.kb_is_covered(i, 1.0, 0) for i in ids) and not any(ev.kb_is_covered(i, 0.0, 0) for i in ids)
+    assert {i for i in ids if ev.kb_is_covered(i, 0.5, 1)} != c50      # the seed changes the draw
+
+    base = ev.load_dataset(str(ROOT / "eval_data" / "sample_qa.jsonl"), "halueval")
+    wrong = {"Who wrote the play Hamlet?": "Marlowe", "What is the capital of Australia?": "Sydney",
+             "Which planet is known as the Red Planet?": "Venus", "In which city is the Eiffel Tower located?": "Lyon",
+             "Who discovered penicillin?": "Unknown", "What is the largest planet in our solar system?": "Saturn"}
+
+    def run(cov, kb_file=None):
+        recs = [dict(r) for r in base]
+        for r in recs:
+            r["answer"] = wrong.get(r["question"], r["gold"][0])
+            r["prob_hallucinated"] = 0.9 if r["question"] in wrong else 0.1
+        a = Namespace(threshold=0.70, default_score=1.0, chroma_dir=os.environ["CHROMA_PERSIST_DIRECTORY"],
+                      no_knowledge=False, oracle_knowledge=False, kb_coverage=cov, kb_seed=0, kb_file=kb_file,
+                      enable_web=False, isolate_memory=False, match="lenient", llm_judge=False, seed=0, workers=1)
+        ev.KB_POOL[:] = recs
+        rows, _ = ev.run_blackboard_stage(recs, a)
+        b = [ev.grade(r["answer"], r["gold"]) for r in recs]
+        w = [ev.grade(x["final_response"], r["gold"]) for r, x in zip(recs, rows)]
+        return recs, rows, b, w, ev.build_report(recs, rows, b, w, a, {"by_kb_coverage": ev.kb_breakdown(recs, b, w)}), a
+
+    # coverage 1.0 == the plain oracle setting: every passage in the KB
+    recs, rows, b, w, rep1, a1 = run(1.0)
+    n_docs = len({r["knowledge"] for r in recs})
+    assert bc.knowledge_collection.count() == n_docs and all(r["kb_covered"] for r in recs)
+    assert rep1["by_kb_coverage"] is None                                # only one kind of item -> no split
+    assert rep1["with_blackboard"]["hallucinated"] <= 2, rep1["with_blackboard"]
+
+    # coverage 0.0 == empty KB: nothing can be verified, so no invented answers
+    recs, rows, b, w, rep0, a0 = run(0.0)
+    assert bc.knowledge_collection.count() == 0 and not any(r["kb_covered"] for r in recs)
+    assert rep0["with_blackboard"]["hallucinated"] == 0, rep0["with_blackboard"]
+
+    # coverage 0.5: only the covered items' passages are in the KB, and the report splits the two kinds
+    recs, rows, b, w, rep5, a5 = run(0.5)
+    cov_ids = {r["id"] for r in recs if r["kb_covered"]}
+    assert 0 < len(cov_ids) < len(recs)
+    assert bc.knowledge_collection.count() == len({r["knowledge"] for r in recs if r["kb_covered"]})
+    sp = rep5["by_kb_coverage"]
+    assert sp["covered"]["n"] == len(cov_ids) and sp["covered"]["n"] + sp["not_covered"]["n"] == len(recs)
+    assert sp["not_covered"]["with_blackboard"]["correct"] <= sp["not_covered"]["without_blackboard"]["correct"] + 1
+    assert "DOMAIN KB" in rep5["config"]["knowledge_base"]
+    txt = ev.format_summary(rep5)
+    assert "By knowledge-base coverage" in txt and "gold passage NOT in KB" in txt
+    # a retry-style subset must see the same KB as the full run (pool, not the subset)
+    sub = [r for r in recs if r["question"] in wrong][:2]
+    ev.run_blackboard_stage(sub, a5)
+    assert bc.knowledge_collection.count() == len({r["knowledge"] for r in recs if r["kb_covered"]})
+
+    # extra domain corpus (--kb_file) is added on top of the gold passages
+    import tempfile as _t
+    tf = _t.NamedTemporaryFile("w", suffix=".txt", delete=False)
+    tf.write("Insulin is produced in the pancreas.\n\nThe mitral valve sits between the left atrium and ventricle.\n")
+    tf.close()
+    recs, rows, *_ = run(0.5, kb_file=tf.name)
+    assert bc.knowledge_collection.count() == len({r["knowledge"] for r in recs if r["kb_covered"]}) + 2
+    assert ev.read_kb_file(tf.name)[0].startswith("Insulin")
+    rows_json = _t.NamedTemporaryFile("w", suffix=".jsonl", delete=False)
+    rows_json.write(json.dumps({"text": "a"}) + "\n" + json.dumps({"passage": "b"}) + "\n"); rows_json.close()
+    assert ev.read_kb_file(rows_json.name) == ["a", "b"]
+
+    # closed-book run after a covered one must not leave stale tags behind
+    ev.tag_kb_coverage(recs, Namespace(no_knowledge=True, oracle_knowledge=False, kb_coverage=None, seed=0))
+    assert not any("kb_covered" in r for r in recs)
+
+    # a stage-2 checkpoint written before these settings existed must still be reusable
+    import tempfile as _t2
+    d = Path(_t2.mkdtemp())
+    old_args = Namespace(**{k: None for k in ev.STAGE2_KEYS})
+    old_args.threshold, old_args.no_knowledge = 0.7, True
+    legacy = {k: getattr(old_args, k) for k in ev.STAGE2_KEYS if k not in ev._STAGE2_KEY_DEFAULTS}
+    rr = [{"id": 0, "question": "q"}]
+    with open(d / "bb_rows.jsonl", "w") as f:
+        f.write(json.dumps({"_meta": legacy}) + "\n" + json.dumps({"id": 0, "question": "q", "status": "X"}) + "\n")
+    assert ev.load_stage2_rows(d / "bb_rows.jsonl", rr, old_args)[0]["status"] == "X"
+    import kb_coverage_sweep as sw
+    md = sw.build_summary([(0.0, rep0), (0.5, rep5), (1.0, rep1)])
+    assert "| 0.5 | gold passage in KB |" in md and "| 0.5 | gold passage NOT in KB |" in md
+    assert "| 1 | gold passage in KB |" in md and "| 0 | gold passage NOT in KB |" in md
+    print("ok  domain-KB coverage: selection, KB contents, split report, kb_file, sweep table, checkpoint compat")
+
+
 if __name__ == "__main__":
     test_grading()
     test_processing_error_accounting()
     test_stats_and_guards()
     test_stage2()
+    test_kb_coverage()
     test_retry_and_fallback()
     test_control_parallel_resume_and_checkpoint()
     test_rate_limit_handling()
